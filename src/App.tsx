@@ -21,6 +21,7 @@ import TitleBar from "./components/TitleBar";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { TermsAcceptance } from "./components/TermsAcceptance";
 import ShaderBackground from "./components/ShaderBackground";
+import ErrorBoundary from "./components/ErrorBoundary";
 import {
     EVENTS,
     STORAGE_KEYS,
@@ -661,13 +662,15 @@ function App() {
             )}
             <TitleBar />
             <UpdateChecker />
-            <ShaderBackground
-                speed={0.15}
-                intensity={0.8}
-                scale={1.8}
-                opacity={0.6}
-                enabled={true}
-            />
+            <ErrorBoundary fallback={<div style={{ display: 'none' }} />}>
+                <ShaderBackground
+                    speed={0.15}
+                    intensity={0.8}
+                    scale={1.8}
+                    opacity={0.6}
+                    enabled={true}
+                />
+            </ErrorBoundary>
             <div className="app">
                 <div className="logo">
                     <span className="logo-text">rip</span>

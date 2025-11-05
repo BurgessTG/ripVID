@@ -1,11 +1,9 @@
-import { Component, ErrorInfo, ReactNode } from "react";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import React, { Component, ErrorInfo, ReactNode } from "react";
 import "./ErrorBoundary.css";
 
 interface Props {
     children: ReactNode;
     fallback?: ReactNode;
-    onError?: (error: Error, errorInfo: ErrorInfo) => void;
 }
 
 interface State {
@@ -15,15 +13,8 @@ interface State {
 }
 
 /**
- * ErrorBoundary component for desktop app that catches JavaScript errors anywhere in the child component tree,
- * logs those errors, and displays a fallback UI instead of crashing the whole application.
- *
- * Features:
- * - Displays user-friendly error messages
- * - Provides recovery options (reload, reset)
- * - Logs errors for debugging
- * - Supports custom fallback UI
- * - Shows error details in development mode
+ * Error Boundary Component
+ * Catches JavaScript errors anywhere in the child component tree and displays a fallback UI
  */
 class ErrorBoundary extends Component<Props, State> {
     constructor(props: Props) {
@@ -36,23 +27,12 @@ class ErrorBoundary extends Component<Props, State> {
     }
 
     static getDerivedStateFromError(error: Error): Partial<State> {
-        return {
-            hasError: true,
-            error,
-        };
+        return { hasError: true, error };
     }
 
     componentDidCatch(error: Error, errorInfo: ErrorInfo) {
         console.error("ErrorBoundary caught an error:", error, errorInfo);
-
-        this.setState({
-            error,
-            errorInfo,
-        });
-
-        if (this.props.onError) {
-            this.props.onError(error, errorInfo);
-        }
+        this.setState({ error, errorInfo });
     }
 
     handleReload = () => {
@@ -76,68 +56,41 @@ class ErrorBoundary extends Component<Props, State> {
             return (
                 <div className="error-boundary">
                     <div className="error-boundary-content">
-                        <div className="error-icon">
-                            <AlertTriangle size={48} />
-                        </div>
-
-                        <h1 className="error-title">
-                            Oops! Something went wrong
-                        </h1>
-
-                        <p className="error-description">
-                            We're sorry, but something unexpected happened. Your
-                            downloads and settings are safe.
+                        <div className="error-icon">⚠️</div>
+                        <h1>Oops! Something went wrong</h1>
+                        <p className="error-message">
+                            The application encountered an unexpected error.
                         </p>
 
-                        <div className="error-actions">
-                            <button
-                                className="error-button primary"
-                                onClick={this.handleReload}
-                            >
-                                <RefreshCw size={18} />
-                                Reload Application
-                            </button>
-
-                            <button
-                                className="error-button secondary"
-                                onClick={this.handleReset}
-                            >
-                                Try Again
-                            </button>
-                        </div>
-
-                        {import.meta.env.DEV && this.state.error && (
+                        {this.state.error && (
                             <details className="error-details">
-                                <summary>Error Details (Dev Mode)</summary>
-                                <div className="error-stack">
-                                    <strong>Error:</strong>
-                                    <pre>{this.state.error.toString()}</pre>
-
-                                    {this.state.errorInfo && (
-                                        <>
-                                            <strong>Component Stack:</strong>
-                                            <pre>
-                                                {
-                                                    this.state.errorInfo
-                                                        .componentStack
-                                                }
-                                            </pre>
-                                        </>
-                                    )}
-                                </div>
+                                <summary>Error Details</summary>
+                                <pre className="error-stack">
+                                    {this.state.error.toString()}
+                                    {this.state.errorInfo?.componentStack}
+                                </pre>
                             </details>
                         )}
 
-                        <p className="error-help">
-                            If this problem persists, please{" "}
+                        <div className="error-actions">
+                            <button className="error-button primary" onClick={this.handleReload}>
+                                Reload App
+                            </button>
+                            <button className="error-button secondary" onClick={this.handleReset}>
+                                Try Again
+                            </button>
                             <a
-                                href="https://github.com/BurgessTheGamer/ripVID/issues"
+                                href="https://github.com/yourusername/ripvid/issues"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="error-link"
+                                className="error-button secondary"
                             >
-                                report it on GitHub
+                                Report Issue
                             </a>
+                        </div>
+
+                        <p className="error-hint">
+                            If this problem persists, try clearing your browser cache or reinstalling the application.
                         </p>
                     </div>
                 </div>
