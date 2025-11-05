@@ -1,0 +1,9 @@
+node_modules
+dist
+build
+*.config.js
+*.config.ts
+.tauri
+src-tauri/target
+coverage
+*.min.js
