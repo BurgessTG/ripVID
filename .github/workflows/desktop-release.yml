@@ -271,12 +271,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Security Audit
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run Rust Security Audit
         run: |
-          echo "Running security audit..."
-          # Add security scanning tools here
+          echo "Running Rust security audit..."
+          cd src-tauri
+          cargo audit --deny warnings
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run NPM Security Audit
+        run: |
+          echo "Running NPM security audit..."
+          npm audit --audit-level=high
 
       - name: Check for vulnerabilities
         run: |
-          echo "Checking for known vulnerabilities..."
-          # Add vulnerability scanning
+          echo "Security scan completed successfully!"
+          echo "✓ Rust dependencies scanned with cargo-audit"
+          echo "✓ NPM dependencies scanned with npm audit"
