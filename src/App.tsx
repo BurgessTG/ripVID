@@ -21,6 +21,17 @@ import TitleBar from "./components/TitleBar";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { TermsAcceptance } from "./components/TermsAcceptance";
 import ShaderBackground from "./components/ShaderBackground";
+import {
+    EVENTS,
+    STORAGE_KEYS,
+    PLATFORMS,
+    DOWNLOAD_STATUS,
+    FORMATS,
+    QUALITY_OPTIONS,
+    ARCHIVE_TABS,
+    KEYBOARD,
+    DEFAULTS,
+} from "@constants/index";
 import "./components/TermsAcceptance.css";
 import "./App.css";
 
@@ -61,12 +72,12 @@ function App() {
     const [platform, setPlatform] = useState<string | null>(null);
     const [archiveOpen, setArchiveOpen] = useState(false);
     const [archive, setArchive] = useState<ArchiveItem[]>([]);
-    const [downloadFormat, setDownloadFormat] = useState<"mp3" | "mp4">("mp4");
+    const [downloadFormat, setDownloadFormat] = useState<"mp3" | "mp4">(DEFAULTS.FORMAT);
     const [archiveTab, setArchiveTab] = useState<"all" | "video" | "audio">(
         "all",
     );
     const [showTerms, setShowTerms] = useState(false);
-    const [quality, setQuality] = useState<string>("best");
+    const [quality, setQuality] = useState<string>(DEFAULTS.QUALITY);
     const [useBrowserCookies, setUseBrowserCookies] = useState(false); // Deprecated - smart retry handles this automatically
     const [currentDownloadId, setCurrentDownloadId] = useState<string | null>(
         null,
@@ -84,26 +95,26 @@ function App() {
     useEffect(() => {
         // Listen for download progress
         const progressUnsubscribe = listen<DownloadProgress>(
-            "download-progress",
+            EVENTS.DOWNLOAD_PROGRESS,
             (event) => {
                 console.log("Progress event:", event.payload);
                 setProgress(event.payload);
-                setStatus("downloading");
+                setStatus(DOWNLOAD_STATUS.DOWNLOADING);
             },
         );
 
         // Listen for download started
         const startedUnsubscribe = listen<DownloadStarted>(
-            "download-started",
+            EVENTS.DOWNLOAD_STARTED,
             (event) => {
                 console.log("Download started:", event.payload);
                 setCurrentDownloadId(event.payload.id);
-                setStatus("downloading");
+                setStatus(DOWNLOAD_STATUS.DOWNLOADING);
             },
         );
 
         // Listen for download status messages (from stderr)
-        const statusUnsubscribe = listen<string>("download-status", (event) => {
+        const statusUnsubscribe = listen<string>(EVENTS.DOWNLOAD_STATUS, (event) => {
             console.log("Status message:", event.payload);
         });
 
@@ -111,9 +122,9 @@ function App() {
         const processingUnsubscribe = listen<{
             message: string;
             id: string;
-        }>("download-processing", (event) => {
+        }>(EVENTS.DOWNLOAD_PROCESSING, (event) => {
             console.log("Processing:", event.payload);
-            setStatus("processing");
+            setStatus(DOWNLOAD_STATUS.PROCESSING);
             setProgress(null); // Clear percentage since we're in merge phase
         });
 
@@ -123,7 +134,7 @@ function App() {
             id: string;
             path?: string;
             error?: string;
-        }>("download-complete", async (event) => {
+        }>(EVENTS.DOWNLOAD_COMPLETE, async (event) => {
             console.log("Download complete:", event.payload);
 
             if (
@@ -155,7 +166,7 @@ function App() {
                         setArchive((prevArchive) => {
                             const newArchive = [newItem, ...prevArchive];
                             localStorage.setItem(
-                                "ripvid-archive",
+                                STORAGE_KEYS.ARCHIVE,
                                 JSON.stringify(newArchive),
                             );
                             return newArchive;
@@ -172,7 +183,7 @@ function App() {
                 }
             }
 
-            setStatus(event.payload.success ? "success" : "error");
+            setStatus(event.payload.success ? DOWNLOAD_STATUS.SUCCESS : DOWNLOAD_STATUS.ERROR);
             setIsDownloading(false);
             setCurrentDownloadId(null);
             downloadInfoRef.current = null;
@@ -180,10 +191,10 @@ function App() {
 
         // Listen for download cancellation
         const cancelledUnsubscribe = listen<{ id: string; path: string }>(
-            "download-cancelled",
+            EVENTS.DOWNLOAD_CANCELLED,
             (event) => {
                 console.log("Download cancelled:", event.payload);
-                setStatus("cancelled");
+                setStatus(DOWNLOAD_STATUS.CANCELLED);
                 setIsDownloading(false);
                 setCurrentDownloadId(null);
                 downloadInfoRef.current = null;
@@ -204,7 +215,7 @@ function App() {
         // Initialize app and check first launch
         const initializeApp = async () => {
             // Check if terms have been accepted
-            const termsAccepted = localStorage.getItem("ripvid-terms-accepted");
+            const termsAccepted = localStorage.getItem(STORAGE_KEYS.TERMS_ACCEPTED);
             if (!termsAccepted) {
                 setShowTerms(true);
             } else {
@@ -217,7 +228,7 @@ function App() {
             await appWindow.show();
 
             // Load archive from localStorage
-            const saved = localStorage.getItem("ripvid-archive");
+            const saved = localStorage.getItem(STORAGE_KEYS.ARCHIVE);
             if (saved) {
                 const loadedArchive = JSON.parse(saved);
                 setArchive(loadedArchive);
@@ -225,17 +236,17 @@ function App() {
                 verifyArchiveFiles(loadedArchive);
             }
             // Load format preference
-            const savedFormat = localStorage.getItem("ripvid-format");
-            if (savedFormat === "mp3" || savedFormat === "mp4") {
+            const savedFormat = localStorage.getItem(STORAGE_KEYS.FORMAT);
+            if (savedFormat === FORMATS.MP3 || savedFormat === FORMATS.MP4) {
                 setDownloadFormat(savedFormat);
             }
             // Load quality preference
-            const savedQuality = localStorage.getItem("ripvid-quality");
+            const savedQuality = localStorage.getItem(STORAGE_KEYS.QUALITY);
             if (savedQuality) {
                 setQuality(savedQuality);
             }
             // Load cookie preference
-            const savedCookies = localStorage.getItem("ripvid-use-cookies");
+            const savedCookies = localStorage.getItem(STORAGE_KEYS.USE_COOKIES);
             if (savedCookies === "true") {
                 setUseBrowserCookies(true);
             }
@@ -273,12 +284,12 @@ function App() {
 
     useEffect(() => {
         if (
-            status === "success" ||
-            status === "error" ||
-            status === "cancelled"
+            status === DOWNLOAD_STATUS.SUCCESS ||
+            status === DOWNLOAD_STATUS.ERROR ||
+            status === DOWNLOAD_STATUS.CANCELLED
         ) {
             const timer = setTimeout(() => {
-                setStatus("idle");
+                setStatus(DOWNLOAD_STATUS.IDLE);
                 setProgress(null);
                 setUrl("");
                 if (inputRef.current) {
@@ -403,9 +414,9 @@ function App() {
     };
 
     const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === "Enter") {
+        if (e.key === KEYBOARD.ENTER) {
             handleDownload();
-        } else if (e.key === "Escape") {
+        } else if (e.key === KEYBOARD.ESCAPE) {
             if (isDownloading) {
                 handleCancelDownload();
             } else {
@@ -413,7 +424,7 @@ function App() {
                 setPlatform(null);
                 setStatus("idle");
             }
-        } else if (e.key === "Tab") {
+        } else if (e.key === KEYBOARD.TAB) {
             e.preventDefault();
             setArchiveOpen(!archiveOpen);
         }
@@ -456,13 +467,13 @@ function App() {
             // Remove from archive
             const newArchive = archive.filter((item) => item.id !== id);
             setArchive(newArchive);
-            localStorage.setItem("ripvid-archive", JSON.stringify(newArchive));
+            localStorage.setItem(STORAGE_KEYS.ARCHIVE, JSON.stringify(newArchive));
         } catch (error) {
             console.error("Failed to recycle file:", error);
             // Still remove from archive even if file recycling fails
             const newArchive = archive.filter((item) => item.id !== id);
             setArchive(newArchive);
-            localStorage.setItem("ripvid-archive", JSON.stringify(newArchive));
+            localStorage.setItem(STORAGE_KEYS.ARCHIVE, JSON.stringify(newArchive));
         }
     };
 
@@ -559,7 +570,7 @@ function App() {
     };
 
     const handleAcceptTerms = async () => {
-        localStorage.setItem("ripvid-terms-accepted", "true");
+        localStorage.setItem(STORAGE_KEYS.TERMS_ACCEPTED, "true");
         setShowTerms(false);
         await setupFolderStructure();
     };
@@ -571,14 +582,14 @@ function App() {
     };
 
     const toggleFormat = () => {
-        const newFormat = downloadFormat === "mp4" ? "mp3" : "mp4";
+        const newFormat = downloadFormat === FORMATS.MP4 ? FORMATS.MP3 : FORMATS.MP4;
         setDownloadFormat(newFormat);
-        localStorage.setItem("ripvid-format", newFormat);
+        localStorage.setItem(STORAGE_KEYS.FORMAT, newFormat);
     };
 
     const handleQualityChange = (newQuality: string) => {
         setQuality(newQuality);
-        localStorage.setItem("ripvid-quality", newQuality);
+        localStorage.setItem(STORAGE_KEYS.QUALITY, newQuality);
     };
 
     // handleCookieToggle removed - smart retry handles authentication automatically
@@ -599,7 +610,7 @@ function App() {
     };
 
     const getStatusContent = () => {
-        if (status === "processing") {
+        if (status === DOWNLOAD_STATUS.PROCESSING) {
             return (
                 <div className="processing-text">
                     <RefreshCw size={14} className="processing-spinner" />
@@ -625,15 +636,15 @@ function App() {
             );
         }
 
-        if (status === "success") {
+        if (status === DOWNLOAD_STATUS.SUCCESS) {
             return <div className="success-text">Download complete</div>;
         }
 
-        if (status === "error") {
+        if (status === DOWNLOAD_STATUS.ERROR) {
             return <div className="error-text">Download failed</div>;
         }
 
-        if (status === "cancelled") {
+        if (status === DOWNLOAD_STATUS.CANCELLED) {
             return <div className="cancelled-text">Download cancelled</div>;
         }
 
