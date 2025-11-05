@@ -37,3 +37,24 @@ uuid = { version = "1", features = ["v4"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Development profile - optimized for fast compilation
+[profile.dev]
+opt-level = 0
+debug = true
+split-debuginfo = "packed"
+
+# Release profile - maximum optimizations for production
+[profile.release]
+opt-level = 3              # Maximum optimizations
+lto = "fat"                # Link-time optimization (thorough)
+codegen-units = 1          # Better optimization but slower compile
+strip = true               # Remove debug symbols
+panic = "abort"            # Smaller binary
+incremental = false        # Disable incremental builds in release
+
+# Release with debug symbols - for production debugging
+[profile.release-with-debug]
+inherits = "release"
+strip = false              # Keep symbols for debugging
+debug = true               # Include debug info

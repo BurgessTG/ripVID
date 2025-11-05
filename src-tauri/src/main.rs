@@ -23,7 +23,7 @@ use binary_manager::BinaryManager;
 use download::{
     cancel_download, download_content_with_smart_retry, BrowserConfig, DownloadHandle, DownloadType,
 };
-use validation::validate_path;
+use validation::{validate_output_path, validate_path, validate_url};
 use ytdlp_updater::YtdlpUpdater;
 
 /// Application state shared across all commands
@@ -38,18 +38,21 @@ struct AppState {
 async fn detect_platform(url: String) -> Result<String, String> {
     info!("Detecting platform for URL: {}", url);
 
-    if url.contains("youtube.com") || url.contains("youtu.be") {
+    // Validate URL before processing
+    let validated_url = validate_url(&url)?;
+
+    if validated_url.contains("youtube.com") || validated_url.contains("youtu.be") {
         Ok("youtube".to_string())
-    } else if url.contains("x.com") || url.contains("twitter.com") {
+    } else if validated_url.contains("x.com") || validated_url.contains("twitter.com") {
         Ok("x".to_string())
-    } else if url.contains("facebook.com") || url.contains("fb.watch") {
+    } else if validated_url.contains("facebook.com") || validated_url.contains("fb.watch") {
         Ok("facebook".to_string())
-    } else if url.contains("instagram.com") {
+    } else if validated_url.contains("instagram.com") {
         Ok("instagram".to_string())
-    } else if url.contains("tiktok.com") {
+    } else if validated_url.contains("tiktok.com") {
         Ok("tiktok".to_string())
     } else {
-        warn!("Unsupported platform: {}", url);
+        warn!("Unsupported platform: {}", validated_url);
         Err("Unsupported platform".to_string())
     }
 }
@@ -59,6 +62,9 @@ async fn detect_platform(url: String) -> Result<String, String> {
 async fn get_video_info(url: String, app: tauri::AppHandle) -> Result<String, String> {
     info!("Fetching video info for: {}", url);
 
+    // Validate URL before processing
+    let validated_url = validate_url(&url)?;
+
     let output = app
         .shell()
         .sidecar("yt-dlp")
@@ -66,7 +72,7 @@ async fn get_video_info(url: String, app: tauri::AppHandle) -> Result<String, St
             error!("Failed to create sidecar: {}", e);
             e.to_string()
         })?
-        .args(&["--no-playlist", "--dump-json", &url])
+        .args(&["--no-playlist", "--dump-json", &validated_url])
         .output()
         .await
         .map_err(|e| {
@@ -99,10 +105,14 @@ async fn download_video(
 ) -> Result<String, String> {
     info!("Video download requested: url={}, quality={}", url, quality);
 
+    // Validate inputs before processing
+    let validated_url = validate_url(&url)?;
+    let validated_path = validate_output_path(&output_path)?;
+
     // Use smart retry - no manual cookie configuration needed
     download_content_with_smart_retry(
-        url,
-        output_path,
+        validated_url,
+        validated_path.to_string_lossy().to_string(),
         DownloadType::Video { quality },
         window,
         app,
@@ -127,10 +137,14 @@ async fn download_audio(
 ) -> Result<String, String> {
     info!("Audio download requested: url={}", url);
 
+    // Validate inputs before processing
+    let validated_url = validate_url(&url)?;
+    let validated_path = validate_output_path(&output_path)?;
+
     // Use smart retry - no manual cookie configuration needed
     download_content_with_smart_retry(
-        url,
-        output_path,
+        validated_url,
+        validated_path.to_string_lossy().to_string(),
         DownloadType::Audio,
         window,
         app,
@@ -160,7 +174,11 @@ async fn cancel_download_command(
 #[tauri::command]
 fn create_directory(path: String) -> Result<(), String> {
     info!("Creating directory: {}", path);
-    fs::create_dir_all(&path).map_err(|e| {
+
+    // Validate path before creating directory
+    let validated_path = validate_output_path(&path)?;
+
+    fs::create_dir_all(&validated_path).map_err(|e| {
         error!("Failed to create directory {}: {}", path, e);
         e.to_string()
     })
@@ -353,7 +371,11 @@ fn open_folder_fallback(path: String) -> Result<(), String> {
 #[tauri::command]
 fn recycle_file(path: String) -> Result<(), String> {
     info!("Moving file to recycle bin: {}", path);
-    trash::delete(&path).map_err(|e| {
+
+    // Validate path before deleting
+    let validated_path = validate_path(&path, false)?;
+
+    trash::delete(&validated_path).map_err(|e| {
         error!("Failed to recycle file {}: {}", path, e);
         e.to_string()
     })

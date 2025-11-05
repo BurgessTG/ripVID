@@ -152,12 +152,14 @@ function App() {
                             fileExists: true,
                         };
 
-                        const newArchive = [newItem, ...archive];
-                        setArchive(newArchive);
-                        localStorage.setItem(
-                            "ripvid-archive",
-                            JSON.stringify(newArchive),
-                        );
+                        setArchive((prevArchive) => {
+                            const newArchive = [newItem, ...prevArchive];
+                            localStorage.setItem(
+                                "ripvid-archive",
+                                JSON.stringify(newArchive),
+                            );
+                            return newArchive;
+                        });
                         console.log("Added to archive:", newItem);
                     } else {
                         console.warn(
@@ -196,7 +198,7 @@ function App() {
             completeUnsubscribe.then((fn) => fn());
             cancelledUnsubscribe.then((fn) => fn());
         };
-    }, [archive]);
+    }, []);
 
     useEffect(() => {
         // Initialize app and check first launch
