@@ -82,7 +82,7 @@ impl YtdlpUpdater {
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or(std::time::Duration::from_secs(0))
             .as_secs();
 
         // Check once per day
@@ -237,7 +237,7 @@ impl YtdlpUpdater {
             version: version.to_string(),
             last_check: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or(std::time::Duration::from_secs(0))
                 .as_secs(),
             path: ytdlp_path.to_string_lossy().to_string(),
         };

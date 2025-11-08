@@ -4,9 +4,24 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { Button } from './ui/button';
 import { X, Download } from 'lucide-react';
 
+interface DownloadEvent {
+  event: 'Started' | 'Progress' | 'Finished';
+  data: {
+    contentLength?: number;
+    chunkLength?: number;
+  };
+}
+
+interface UpdateInfo {
+  version: string;
+  body?: string;
+  available: boolean;
+  downloadAndInstall: (callback: (event: DownloadEvent) => void) => Promise<void>;
+}
+
 export function UpdateChecker() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
-  const [updateInfo, setUpdateInfo] = useState<any>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -23,10 +38,10 @@ export function UpdateChecker() {
       const update = await check();
       if (update?.available) {
         setUpdateAvailable(true);
-        setUpdateInfo(update);
+        setUpdateInfo(update as UpdateInfo);
       }
-    } catch (error) {
-      console.error('Failed to check for updates:', error);
+    } catch (_error) {
+      // Failed to check for updates
     }
   }
 
@@ -41,29 +56,28 @@ export function UpdateChecker() {
       let downloaded = 0;
       let contentLength = 0;
 
-      await updateInfo.downloadAndInstall((event: any) => {
+      await updateInfo.downloadAndInstall((event: DownloadEvent) => {
         switch (event.event) {
           case 'Started':
             contentLength = event.data.contentLength || 0;
-            console.log(`Started downloading ${contentLength} bytes`);
             break;
           case 'Progress':
-            downloaded += event.data.chunkLength;
+            downloaded += event.data.chunkLength || 0;
             if (contentLength > 0) {
               const percentage = (downloaded / contentLength) * 100;
               setProgress(Math.round(percentage));
             }
             break;
           case 'Finished':
-            console.log('Download finished');
+            // Download complete
             break;
         }
       });
 
       // Restart the app
       await relaunch();
-    } catch (error: any) {
-      setError(error.toString());
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
       setDownloading(false);
     }
   }

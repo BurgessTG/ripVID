@@ -158,7 +158,7 @@ impl BinaryManager {
             if let Ok(last_check) = content.parse::<u64>() {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or(std::time::Duration::from_secs(0))
                     .as_secs();
 
                 // Check once per day
@@ -172,7 +172,7 @@ impl BinaryManager {
     fn save_last_check(&self) -> Result<(), String> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or(std::time::Duration::from_secs(0))
             .as_secs();
 
         let version_file = self.data_dir.join("last-check.json");
@@ -545,7 +545,7 @@ impl BinaryManager {
             version: version.to_string(),
             last_check: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or(std::time::Duration::from_secs(0))
                 .as_secs(),
             path: path.to_string_lossy().to_string(),
         };

@@ -40,15 +40,13 @@ export function loadArchive(): ArchiveItem[] {
         const result = ArchiveSchema.safeParse(parsed);
 
         if (!result.success) {
-            console.error("Invalid archive data in localStorage:", result.error);
             // Clear corrupted data
             localStorage.removeItem(STORAGE_KEYS.ARCHIVE);
             return [];
         }
 
         return result.data;
-    } catch (error) {
-        console.error("Failed to load archive from localStorage:", error);
+    } catch (_error) {
         localStorage.removeItem(STORAGE_KEYS.ARCHIVE);
         return [];
     }
@@ -60,8 +58,8 @@ export function loadArchive(): ArchiveItem[] {
 export function saveArchive(archive: ArchiveItem[]): void {
     try {
         localStorage.setItem(STORAGE_KEYS.ARCHIVE, JSON.stringify(archive));
-    } catch (error) {
-        console.error("Failed to save archive to localStorage:", error);
+    } catch (_error) {
+        // Failed to save archive
     }
 }
 
@@ -77,14 +75,12 @@ export function loadString(key: string, allowedValues?: string[]): string | null
 
         // If allowed values specified, validate against them
         if (allowedValues && !allowedValues.includes(value)) {
-            console.warn(`Invalid value "${value}" for key "${key}"`);
             localStorage.removeItem(key);
             return null;
         }
 
         return value;
-    } catch (error) {
-        console.error(`Failed to load ${key} from localStorage:`, error);
+    } catch (_error) {
         return null;
     }
 }
@@ -95,8 +91,8 @@ export function loadString(key: string, allowedValues?: string[]): string | null
 export function saveString(key: string, value: string): void {
     try {
         localStorage.setItem(key, value);
-    } catch (error) {
-        console.error(`Failed to save ${key} to localStorage:`, error);
+    } catch (_error) {
+        // Failed to save string
     }
 }
 
@@ -107,8 +103,7 @@ export function loadBoolean(key: string): boolean {
     try {
         const value = localStorage.getItem(key);
         return value === "true";
-    } catch (error) {
-        console.error(`Failed to load ${key} from localStorage:`, error);
+    } catch (_error) {
         return false;
     }
 }
@@ -119,7 +114,7 @@ export function loadBoolean(key: string): boolean {
 export function saveBoolean(key: string, value: boolean): void {
     try {
         localStorage.setItem(key, value.toString());
-    } catch (error) {
-        console.error(`Failed to save ${key} to localStorage:`, error);
+    } catch (_error) {
+        // Failed to save boolean
     }
 }

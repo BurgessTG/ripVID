@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { homeDir, join } from "@tauri-apps/api/path";
@@ -22,14 +22,12 @@ import { UpdateChecker } from "./components/UpdateChecker";
 import { TermsAcceptance } from "./components/TermsAcceptance";
 import ShaderBackground from "./components/ShaderBackground";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { loadArchive, saveArchive, loadString, loadBoolean } from "@utils/storage";
 import {
     EVENTS,
     STORAGE_KEYS,
-    PLATFORMS,
     DOWNLOAD_STATUS,
     FORMATS,
-    QUALITY_OPTIONS,
-    ARCHIVE_TABS,
     KEYBOARD,
     DEFAULTS,
 } from "@constants/index";
@@ -98,7 +96,6 @@ function App() {
         const progressUnsubscribe = listen<DownloadProgress>(
             EVENTS.DOWNLOAD_PROGRESS,
             (event) => {
-                console.log("Progress event:", event.payload);
                 setProgress(event.payload);
                 setStatus(DOWNLOAD_STATUS.DOWNLOADING);
             },
@@ -108,23 +105,21 @@ function App() {
         const startedUnsubscribe = listen<DownloadStarted>(
             EVENTS.DOWNLOAD_STARTED,
             (event) => {
-                console.log("Download started:", event.payload);
                 setCurrentDownloadId(event.payload.id);
                 setStatus(DOWNLOAD_STATUS.DOWNLOADING);
             },
         );
 
         // Listen for download status messages (from stderr)
-        const statusUnsubscribe = listen<string>(EVENTS.DOWNLOAD_STATUS, (event) => {
-            console.log("Status message:", event.payload);
+        const statusUnsubscribe = listen<string>(EVENTS.DOWNLOAD_STATUS, (_event) => {
+            // Status messages logged for debugging if needed
         });
 
         // Listen for download processing (ffmpeg merge)
         const processingUnsubscribe = listen<{
             message: string;
             id: string;
-        }>(EVENTS.DOWNLOAD_PROCESSING, (event) => {
-            console.log("Processing:", event.payload);
+        }>(EVENTS.DOWNLOAD_PROCESSING, (_event) => {
             setStatus(DOWNLOAD_STATUS.PROCESSING);
             setProgress(null); // Clear percentage since we're in merge phase
         });
@@ -136,8 +131,6 @@ function App() {
             path?: string;
             error?: string;
         }>(EVENTS.DOWNLOAD_COMPLETE, async (event) => {
-            console.log("Download complete:", event.payload);
-
             if (
                 event.payload.success &&
                 event.payload.path &&
@@ -166,21 +159,12 @@ function App() {
 
                         setArchive((prevArchive) => {
                             const newArchive = [newItem, ...prevArchive];
-                            localStorage.setItem(
-                                STORAGE_KEYS.ARCHIVE,
-                                JSON.stringify(newArchive),
-                            );
+                            saveArchive(newArchive);
                             return newArchive;
                         });
-                        console.log("Added to archive:", newItem);
-                    } else {
-                        console.warn(
-                            "File not found after download:",
-                            event.payload.path,
-                        );
                     }
-                } catch (error) {
-                    console.error("Failed to verify file:", error);
+                } catch (_error) {
+                    // File verification failed
                 }
             }
 
@@ -193,8 +177,7 @@ function App() {
         // Listen for download cancellation
         const cancelledUnsubscribe = listen<{ id: string; path: string }>(
             EVENTS.DOWNLOAD_CANCELLED,
-            (event) => {
-                console.log("Download cancelled:", event.payload);
+            (_event) => {
                 setStatus(DOWNLOAD_STATUS.CANCELLED);
                 setIsDownloading(false);
                 setCurrentDownloadId(null);
@@ -228,60 +211,60 @@ function App() {
             const appWindow = getCurrentWebviewWindow();
             await appWindow.show();
 
-            // Load archive from localStorage
-            const saved = localStorage.getItem(STORAGE_KEYS.ARCHIVE);
-            if (saved) {
-                const loadedArchive = JSON.parse(saved);
+            // Load archive from localStorage with safe parsing
+            const loadedArchive = loadArchive();
+            if (loadedArchive.length > 0) {
                 setArchive(loadedArchive);
                 // Verify files exist in background
                 verifyArchiveFiles(loadedArchive);
             }
-            // Load format preference
-            const savedFormat = localStorage.getItem(STORAGE_KEYS.FORMAT);
+
+            // Load format preference with validation
+            const savedFormat = loadString(STORAGE_KEYS.FORMAT, [FORMATS.MP3, FORMATS.MP4]);
             if (savedFormat === FORMATS.MP3 || savedFormat === FORMATS.MP4) {
                 setDownloadFormat(savedFormat);
             }
+
             // Load quality preference
-            const savedQuality = localStorage.getItem(STORAGE_KEYS.QUALITY);
+            const savedQuality = loadString(STORAGE_KEYS.QUALITY);
             if (savedQuality) {
                 setQuality(savedQuality);
             }
+
             // Load cookie preference
-            const savedCookies = localStorage.getItem(STORAGE_KEYS.USE_COOKIES);
-            if (savedCookies === "true") {
-                setUseBrowserCookies(true);
-            }
+            const savedCookies = loadBoolean(STORAGE_KEYS.USE_COOKIES);
+            setUseBrowserCookies(savedCookies);
         };
 
         initializeApp();
     }, []);
 
+    const handleClickOutside = useCallback((event: MouseEvent) => {
+        if (
+            archiveOpen &&
+            archivePanelRef.current &&
+            !archivePanelRef.current.contains(event.target as Node) &&
+            !(event.target as Element).closest(".archive-toggle")
+        ) {
+            setArchiveOpen(false);
+        }
+
+        if (
+            showSettings &&
+            settingsPanelRef.current &&
+            !settingsPanelRef.current.contains(event.target as Node) &&
+            !(event.target as Element).closest(".settings-toggle")
+        ) {
+            setShowSettings(false);
+        }
+    }, [archiveOpen, showSettings]);
+
     useEffect(() => {
-        // Click outside to close archive
-        const handleClickOutside = (event: MouseEvent) => {
-            if (
-                archiveOpen &&
-                archivePanelRef.current &&
-                !archivePanelRef.current.contains(event.target as Node) &&
-                !(event.target as Element).closest(".archive-toggle")
-            ) {
-                setArchiveOpen(false);
-            }
-
-            if (
-                showSettings &&
-                settingsPanelRef.current &&
-                !settingsPanelRef.current.contains(event.target as Node) &&
-                !(event.target as Element).closest(".settings-toggle")
-            ) {
-                setShowSettings(false);
-            }
-        };
-
+        // Click outside to close archive and settings
         document.addEventListener("mousedown", handleClickOutside);
         return () =>
             document.removeEventListener("mousedown", handleClickOutside);
-    }, [archiveOpen, showSettings]);
+    }, [handleClickOutside]);
 
     useEffect(() => {
         if (
@@ -308,8 +291,7 @@ function App() {
             });
             setPlatform(detected);
             return detected;
-        } catch (error) {
-            console.error("Failed to detect platform:", error);
+        } catch (_error) {
             setPlatform(null);
             return null;
         }
@@ -346,14 +328,6 @@ function App() {
     const handleDownload = async () => {
         if (!url.trim() || !platform || isDownloading) return;
 
-        console.log("Starting download:", {
-            url,
-            platform,
-            format: downloadFormat,
-            quality,
-            cookies: useBrowserCookies,
-        });
-
         setIsDownloading(true);
         setStatus("downloading");
         setProgress(null);
@@ -367,31 +341,25 @@ function App() {
 
         try {
             const savePath = await getDownloadPath();
-            console.log("Save path:", savePath);
 
             // Use different command based on format
             if (downloadFormat === "mp3") {
-                console.log("Downloading as MP3...");
-                const downloadId = await invoke<string>("download_audio", {
+                await invoke<string>("download_audio", {
                     url: url.trim(),
                     outputPath: savePath,
                     useBrowserCookies: useBrowserCookies,
                 });
-                console.log("Audio download started with ID:", downloadId);
             } else {
-                console.log("Downloading as MP4 with quality:", quality);
-                const downloadId = await invoke<string>("download_video", {
+                await invoke<string>("download_video", {
                     url: url.trim(),
                     outputPath: savePath,
                     quality: quality,
                     useBrowserCookies: useBrowserCookies,
                 });
-                console.log("Video download started with ID:", downloadId);
             }
 
             // The actual completion and archive addition will be handled by the download-complete event
-        } catch (error) {
-            console.error("Failed to start download:", error);
+        } catch (_error) {
             setStatus("error");
             setIsDownloading(false);
             setCurrentDownloadId(null);
@@ -402,15 +370,12 @@ function App() {
     const handleCancelDownload = async () => {
         if (!currentDownloadId) return;
 
-        console.log("Cancelling download:", currentDownloadId);
-
         try {
             await invoke("cancel_download_command", {
                 downloadId: currentDownloadId,
             });
-            console.log("Download cancelled successfully");
-        } catch (error) {
-            console.error("Failed to cancel download:", error);
+        } catch (_error) {
+            // Cancellation failed
         }
     };
 
@@ -434,7 +399,10 @@ function App() {
     const openFolder = async (path: string) => {
         try {
             // On Windows, open explorer and select the file
-            if (navigator.platform.includes("Win")) {
+            // Use userAgent as navigator.platform is deprecated
+            const isWindows = navigator.userAgent.includes("Windows") ||
+                             navigator.userAgent.includes("Win");
+            if (isWindows) {
                 // Use Windows Explorer with /select flag to highlight the file
                 await invoke("open_file_location", { path: path });
             } else {
@@ -442,8 +410,7 @@ function App() {
                 const folder = path.substring(0, path.lastIndexOf("/"));
                 await open(folder);
             }
-        } catch (error) {
-            console.error("Failed to open folder:", error);
+        } catch (_error) {
             // Fallback: try to open just the folder
             try {
                 const folder = path.substring(
@@ -451,8 +418,8 @@ function App() {
                     Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")),
                 );
                 await open(folder);
-            } catch (fallbackError) {
-                console.error("Fallback also failed:", fallbackError);
+            } catch (_fallbackError) {
+                // Failed to open folder
             }
         }
     };
@@ -468,13 +435,12 @@ function App() {
             // Remove from archive
             const newArchive = archive.filter((item) => item.id !== id);
             setArchive(newArchive);
-            localStorage.setItem(STORAGE_KEYS.ARCHIVE, JSON.stringify(newArchive));
-        } catch (error) {
-            console.error("Failed to recycle file:", error);
+            saveArchive(newArchive);
+        } catch (_error) {
             // Still remove from archive even if file recycling fails
             const newArchive = archive.filter((item) => item.id !== id);
             setArchive(newArchive);
-            localStorage.setItem(STORAGE_KEYS.ARCHIVE, JSON.stringify(newArchive));
+            saveArchive(newArchive);
         }
     };
 
@@ -489,10 +455,8 @@ function App() {
             await invoke("create_directory", { path: ripvidDir });
             await invoke("create_directory", { path: mp4Dir });
             await invoke("create_directory", { path: mp3Dir });
-
-            console.log("Folder structure created successfully");
-        } catch (error) {
-            console.error("Failed to create folder structure:", error);
+        } catch (_error) {
+            // Failed to create folder structure
         }
     };
 
@@ -505,25 +469,22 @@ function App() {
                         path: item.path,
                     });
                     return { ...item, fileExists: exists };
-                } catch (error) {
-                    console.error("Failed to verify file:", item.path, error);
+                } catch (_error) {
                     return { ...item, fileExists: false };
                 }
             }),
         );
 
         setArchive(updatedArchive);
-        localStorage.setItem("ripvid-archive", JSON.stringify(updatedArchive));
+        saveArchive(updatedArchive);
     };
 
     // Refresh archive by scanning actual download folders
     const refreshArchive = async () => {
         try {
-            console.log("Refreshing archive from disk...");
             const files = await invoke<any[]>("scan_downloads_folder");
 
             if (files.length === 0) {
-                console.log("No files found in downloads folder");
                 return;
             }
 
@@ -552,21 +513,13 @@ function App() {
             if (newItems.length > 0) {
                 const mergedArchive = [...archive, ...newItems];
                 setArchive(mergedArchive);
-                localStorage.setItem(
-                    "ripvid-archive",
-                    JSON.stringify(mergedArchive),
-                );
-                console.log(
-                    `Added ${newItems.length} files from disk to archive`,
-                );
-            } else {
-                console.log("All disk files already in archive");
+                saveArchive(mergedArchive);
             }
 
             // Re-verify all files
             await verifyArchiveFiles(archive);
-        } catch (error) {
-            console.error("Failed to refresh archive:", error);
+        } catch (_error) {
+            // Failed to refresh archive
         }
     };
 
@@ -661,7 +614,9 @@ function App() {
                 />
             )}
             <TitleBar />
-            <UpdateChecker />
+            <ErrorBoundary fallback={<div style={{ display: 'none' }} />}>
+                <UpdateChecker />
+            </ErrorBoundary>
             <ErrorBoundary fallback={<div style={{ display: 'none' }} />}>
                 <ShaderBackground
                     speed={0.15}
