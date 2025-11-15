@@ -33,6 +33,16 @@ struct AppState {
     binary_manager: Arc<BinaryManager>,
 }
 
+/// Represents a scanned file in the downloads folder
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ScannedFile {
+    path: String,
+    filename: String,
+    format: String,
+    size: u64,
+    modified: Option<u64>,
+}
+
 /// Detect the platform from a URL
 #[tauri::command]
 async fn detect_platform(url: String) -> Result<String, String> {
@@ -390,9 +400,7 @@ fn file_exists(path: String) -> Result<bool, String> {
 
 /// Scan downloads folders and return list of actual files
 #[tauri::command]
-async fn scan_downloads_folder() -> Result<Vec<serde_json::Value>, String> {
-    use serde_json::json;
-
+async fn scan_downloads_folder() -> Result<Vec<ScannedFile>, String> {
     let home = dirs::home_dir().ok_or("Could not determine home directory")?;
     let ripvid_base = home.join("Videos").join("ripVID");
 
@@ -409,18 +417,19 @@ async fn scan_downloads_folder() -> Result<Vec<serde_json::Value>, String> {
                         let filename = path
                             .file_name()
                             .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
+                            .unwrap_or("unknown")
+                            .to_string();
 
-                        files.push(json!({
-                            "path": path.to_string_lossy().to_string(),
-                            "filename": filename,
-                            "format": "mp4",
-                            "size": metadata.len(),
-                            "modified": metadata.modified()
+                        files.push(ScannedFile {
+                            path: path.to_string_lossy().to_string(),
+                            filename,
+                            format: "mp4".to_string(),
+                            size: metadata.len(),
+                            modified: metadata.modified()
                                 .ok()
                                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs())
-                        }));
+                                .map(|d| d.as_secs()),
+                        });
                     }
                 }
             }
@@ -438,18 +447,19 @@ async fn scan_downloads_folder() -> Result<Vec<serde_json::Value>, String> {
                         let filename = path
                             .file_name()
                             .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
+                            .unwrap_or("unknown")
+                            .to_string();
 
-                        files.push(json!({
-                            "path": path.to_string_lossy().to_string(),
-                            "filename": filename,
-                            "format": "mp3",
-                            "size": metadata.len(),
-                            "modified": metadata.modified()
+                        files.push(ScannedFile {
+                            path: path.to_string_lossy().to_string(),
+                            filename,
+                            format: "mp3".to_string(),
+                            size: metadata.len(),
+                            modified: metadata.modified()
                                 .ok()
                                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs())
-                        }));
+                                .map(|d| d.as_secs()),
+                        });
                     }
                 }
             }

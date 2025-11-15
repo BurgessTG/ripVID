@@ -879,3 +879,41 @@ body {
     transform: translateY(-2px);
     text-shadow: 0 0 20px rgba(139, 92, 246, 0.5);
 }
+
+/* Accessibility: Focus indicators for keyboard navigation */
+button:focus-visible,
+.format-toggle:focus-visible,
+.settings-toggle:focus-visible,
+.archive-toggle:focus-visible,
+.power-button:focus-visible,
+.cancel-button:focus-visible,
+.archive-item:focus-visible,
+.quality-option:focus-visible {
+    outline: 2px solid rgba(139, 92, 246, 0.8);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.2);
+}
+
+.archive-tab:focus-visible {
+    outline: 2px solid rgba(139, 92, 246, 0.8);
+    outline-offset: -2px;
+}
+
+/* Loading spinner animation for refresh button */
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.spin {
+    animation: spin 1s linear infinite;
+}
+
+.archive-refresh-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}

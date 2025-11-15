@@ -4,6 +4,9 @@ import * as THREE from "three";
 import { fragmentShader, vertexShader } from "../shaders/backgroundShader";
 import "./ShaderBackground.css";
 
+// Performance constants
+const MAX_DPR = 2; // Maximum device pixel ratio for performance
+
 interface ShaderBackgroundProps {
     speed?: number;
     intensity?: number;
@@ -125,7 +128,7 @@ export function ShaderBackground({
     if (!enabled) return null;
 
     // Adjust DPR for performance on low-end devices
-    const dpr = isLowEndDevice ? 1 : Math.min(window.devicePixelRatio, 2);
+    const dpr = isLowEndDevice ? 1 : Math.min(window.devicePixelRatio, MAX_DPR);
 
     return (
         <div className="shader-background">

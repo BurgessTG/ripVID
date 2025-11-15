@@ -12,6 +12,8 @@
         "lint:fix": "eslint src --ext ts,tsx --fix",
         "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,json,css}\"",
         "format:check": "prettier --check \"src/**/*.{ts,tsx,js,jsx,json,css}\"",
+        "typecheck": "tsc --noEmit",
+        "audit": "npm audit --audit-level=moderate",
         "tauri": "tauri",
         "tauri:dev": "tauri dev",
         "tauri:build": "tauri build"

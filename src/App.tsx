@@ -16,6 +16,7 @@ import {
     Power,
     AlertCircle,
     RefreshCw,
+    Settings,
 } from "lucide-react";
 import TitleBar from "./components/TitleBar";
 import { UpdateChecker } from "./components/UpdateChecker";
@@ -56,6 +57,14 @@ interface ArchiveItem {
     fileExists?: boolean; // Track if file actually exists on disk
 }
 
+interface ScannedFile {
+    path: string;
+    filename: string;
+    format: string;
+    size: number;
+    modified?: number;
+}
+
 function App() {
     const [url, setUrl] = useState("");
     const [isDownloading, setIsDownloading] = useState(false);
@@ -82,6 +91,7 @@ function App() {
         null,
     );
     const [showSettings, setShowSettings] = useState(false);
+    const [isRefreshing, setIsRefreshing] = useState(false);
     const inputRef = useRef<HTMLInputElement>(null);
     const archivePanelRef = useRef<HTMLDivElement>(null);
     const settingsPanelRef = useRef<HTMLDivElement>(null);
@@ -198,42 +208,52 @@ function App() {
     useEffect(() => {
         // Initialize app and check first launch
         const initializeApp = async () => {
-            // Check if terms have been accepted
-            const termsAccepted = localStorage.getItem(STORAGE_KEYS.TERMS_ACCEPTED);
-            if (!termsAccepted) {
-                setShowTerms(true);
-            } else {
-                // Ensure folder structure exists
-                await setupFolderStructure();
+            try {
+                // Check if terms have been accepted
+                const termsAccepted = localStorage.getItem(STORAGE_KEYS.TERMS_ACCEPTED);
+                if (!termsAccepted) {
+                    setShowTerms(true);
+                } else {
+                    // Ensure folder structure exists
+                    await setupFolderStructure();
+                }
+
+                // Show window once app is ready
+                const appWindow = getCurrentWebviewWindow();
+                await appWindow.show();
+
+                // Load archive from localStorage with safe parsing
+                const loadedArchive = loadArchive();
+                if (loadedArchive.length > 0) {
+                    setArchive(loadedArchive);
+                    // Verify files exist in background
+                    verifyArchiveFiles(loadedArchive);
+                }
+
+                // Load format preference with validation
+                const savedFormat = loadString(STORAGE_KEYS.FORMAT, [FORMATS.MP3, FORMATS.MP4]);
+                if (savedFormat === FORMATS.MP3 || savedFormat === FORMATS.MP4) {
+                    setDownloadFormat(savedFormat);
+                }
+
+                // Load quality preference
+                const savedQuality = loadString(STORAGE_KEYS.QUALITY);
+                if (savedQuality) {
+                    setQuality(savedQuality);
+                }
+
+                // Load cookie preference
+                const savedCookies = loadBoolean(STORAGE_KEYS.USE_COOKIES);
+                setUseBrowserCookies(savedCookies);
+            } catch (_error) {
+                // If initialization fails, still show the window
+                try {
+                    const appWindow = getCurrentWebviewWindow();
+                    await appWindow.show();
+                } catch (_showError) {
+                    // Window show failed - nothing we can do
+                }
             }
-
-            // Show window once app is ready
-            const appWindow = getCurrentWebviewWindow();
-            await appWindow.show();
-
-            // Load archive from localStorage with safe parsing
-            const loadedArchive = loadArchive();
-            if (loadedArchive.length > 0) {
-                setArchive(loadedArchive);
-                // Verify files exist in background
-                verifyArchiveFiles(loadedArchive);
-            }
-
-            // Load format preference with validation
-            const savedFormat = loadString(STORAGE_KEYS.FORMAT, [FORMATS.MP3, FORMATS.MP4]);
-            if (savedFormat === FORMATS.MP3 || savedFormat === FORMATS.MP4) {
-                setDownloadFormat(savedFormat);
-            }
-
-            // Load quality preference
-            const savedQuality = loadString(STORAGE_KEYS.QUALITY);
-            if (savedQuality) {
-                setQuality(savedQuality);
-            }
-
-            // Load cookie preference
-            const savedCookies = loadBoolean(STORAGE_KEYS.USE_COOKIES);
-            setUseBrowserCookies(savedCookies);
         };
 
         initializeApp();
@@ -265,6 +285,22 @@ function App() {
         return () =>
             document.removeEventListener("mousedown", handleClickOutside);
     }, [handleClickOutside]);
+
+    useEffect(() => {
+        // ESC key to close settings and archive panels
+        const handleEscKey = (event: KeyboardEvent) => {
+            if (event.key === KEYBOARD.ESCAPE) {
+                if (showSettings) {
+                    setShowSettings(false);
+                } else if (archiveOpen) {
+                    setArchiveOpen(false);
+                }
+            }
+        };
+
+        document.addEventListener("keydown", handleEscKey);
+        return () => document.removeEventListener("keydown", handleEscKey);
+    }, [showSettings, archiveOpen]);
 
     useEffect(() => {
         if (
@@ -429,19 +465,26 @@ function App() {
         if (!item) return;
 
         try {
-            // Recycle the actual file
+            // Recycle the actual file first
             await invoke("recycle_file", { path: item.path });
-
-            // Remove from archive
-            const newArchive = archive.filter((item) => item.id !== id);
-            setArchive(newArchive);
-            saveArchive(newArchive);
         } catch (_error) {
-            // Still remove from archive even if file recycling fails
-            const newArchive = archive.filter((item) => item.id !== id);
-            setArchive(newArchive);
-            saveArchive(newArchive);
+            // If file deletion fails, still try to remove from archive if file doesn't exist
+            try {
+                const exists = await invoke<boolean>("file_exists", { path: item.path });
+                if (exists) {
+                    // File still exists and deletion failed - keep in archive
+                    return;
+                }
+            } catch (_checkError) {
+                // Cannot verify file existence - keep in archive to be safe
+                return;
+            }
         }
+
+        // Only remove from archive after successful deletion or if file doesn't exist
+        const newArchive = archive.filter((item) => item.id !== id);
+        setArchive(newArchive);
+        saveArchive(newArchive);
     };
 
     const setupFolderStructure = async () => {
@@ -481,8 +524,11 @@ function App() {
 
     // Refresh archive by scanning actual download folders
     const refreshArchive = async () => {
+        if (isRefreshing) return;
+
+        setIsRefreshing(true);
         try {
-            const files = await invoke<any[]>("scan_downloads_folder");
+            const files = await invoke<ScannedFile[]>("scan_downloads_folder");
 
             if (files.length === 0) {
                 return;
@@ -498,7 +544,7 @@ function App() {
                     (file.modified || Date.now() / 1000) * 1000,
                 ).toLocaleDateString(),
                 path: file.path,
-                format: file.format,
+                format: (file.format === "mp3" || file.format === "mp4" ? file.format : "mp4") as "mp3" | "mp4",
                 fileExists: true,
             }));
 
@@ -520,6 +566,8 @@ function App() {
             await verifyArchiveFiles(archive);
         } catch (_error) {
             // Failed to refresh archive
+        } finally {
+            setIsRefreshing(false);
         }
     };
 
@@ -734,7 +782,7 @@ function App() {
                             onClick={() => setShowSettings(true)}
                             aria-label="Open settings"
                         >
-                            ⚙
+                            <Settings size={18} />
                         </button>
                         <button
                             className="archive-toggle"
@@ -777,12 +825,13 @@ function App() {
                             </button>
                         </div>
                         <button
-                            className="archive-refresh-btn"
+                            className={`archive-refresh-btn ${isRefreshing ? "refreshing" : ""}`}
                             onClick={refreshArchive}
-                            title="Refresh archive from disk"
-                            aria-label="Refresh archive"
+                            disabled={isRefreshing}
+                            title={isRefreshing ? "Refreshing..." : "Refresh archive from disk"}
+                            aria-label={isRefreshing ? "Refreshing archive" : "Refresh archive"}
                         >
-                            <RefreshCw size={16} />
+                            <RefreshCw size={16} className={isRefreshing ? "spin" : ""} />
                         </button>
                     </div>
 
