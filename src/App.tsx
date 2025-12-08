@@ -597,6 +597,11 @@ function App() {
         localStorage.setItem("ripvid-quality", newQuality);
     };
 
+    const handleFormatChange = (newFormat: "mp3" | "mp4") => {
+        setDownloadFormat(newFormat);
+        localStorage.setItem("ripvid-format", newFormat);
+    };
+
     // handleCookieToggle removed - smart retry handles authentication automatically
 
     const getFilteredArchive = () => {
