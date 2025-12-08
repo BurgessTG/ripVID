@@ -21,9 +21,9 @@ mod ytdlp_updater;
 
 use binary_manager::BinaryManager;
 use download::{
-    cancel_download, download_content_with_smart_retry, BrowserConfig, DownloadHandle, DownloadType,
+    cancel_download, download_content_with_smart_retry, DownloadHandle, DownloadType,
 };
-use validation::validate_path;
+// validation module available if needed
 use ytdlp_updater::YtdlpUpdater;
 
 /// Application state shared across all commands

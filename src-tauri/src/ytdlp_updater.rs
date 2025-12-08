@@ -177,8 +177,11 @@ impl YtdlpUpdater {
         tracing::info!("Checksum verified successfully: {}", actual_checksum);
 
         // Backup existing version before replacing (rollback capability)
-        let ytdlp_path = self.data_dir.join("yt-dlp.exe");
+        let ytdlp_path = self.get_ytdlp_filename();
+        #[cfg(windows)]
         let backup_path = self.data_dir.join("yt-dlp.exe.backup");
+        #[cfg(not(windows))]
+        let backup_path = self.data_dir.join("yt-dlp.backup");
 
         if ytdlp_path.exists() {
             fs::copy(&ytdlp_path, &backup_path)
@@ -232,7 +235,7 @@ impl YtdlpUpdater {
         fs::create_dir_all(&self.data_dir)
             .map_err(|e| format!("Failed to create data directory: {}", e))?;
 
-        let ytdlp_path = self.data_dir.join("yt-dlp.exe");
+        let ytdlp_path = self.get_ytdlp_filename();
         let version_info = YtdlpVersion {
             version: version.to_string(),
             last_check: SystemTime::now()
@@ -272,8 +275,18 @@ impl YtdlpUpdater {
         return "yt-dlp";
     }
 
+    /// Get the platform-specific filename for yt-dlp
+    fn get_ytdlp_filename(&self) -> PathBuf {
+        #[cfg(windows)]
+        let filename = "yt-dlp.exe";
+        #[cfg(not(windows))]
+        let filename = "yt-dlp";
+
+        self.data_dir.join(filename)
+    }
+
     pub fn get_ytdlp_path(&self) -> Result<PathBuf, String> {
-        let updated_path = self.data_dir.join("yt-dlp.exe");
+        let updated_path = self.get_ytdlp_filename();
 
         // Use updated version if it exists
         if updated_path.exists() {

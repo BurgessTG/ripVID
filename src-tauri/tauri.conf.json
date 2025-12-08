@@ -2,7 +2,7 @@
     "$schema": "../node_modules/@tauri-apps/cli/schema.json",
     "identifier": "com.ripvid.desktop",
     "productName": "ripVID",
-    "version": "2.1.1",
+    "version": "2.2.0",
     "build": {
         "beforeDevCommand": "npm run dev",
         "beforeBuildCommand": "bun run build",
@@ -34,7 +34,7 @@
             "active": true,
             "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2NEQ2NzhCQUE5MzY3QTEKUldTaFo1T3FpMmROMWtiYjJCQlJtNkIydHo5Z3lsZmJUZ2QzUDFKRnM2bnVaOU9HWjdDM1E0R3AK",
             "endpoints": [
-                "https://github.com/BurgessTheGamer/ripVID/releases/latest/download/latest.json"
+                "https://github.com/BurgessTG/ripVID/releases/latest/download/latest.json"
             ]
         }
     },

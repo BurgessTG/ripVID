@@ -3,6 +3,7 @@ use reqwest;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
@@ -134,14 +135,33 @@ impl BinaryManager {
     /// Check for updates in the background (once per day)
     async fn check_updates_background(&self) -> Result<(), String> {
         if !self.should_check_updates()? {
+            info!("Skipping update check - checked recently");
             return Ok(());
         }
 
         info!("Checking for binary updates...");
 
-        // Update each binary if needed (non-blocking, best effort)
-        let _ = self.update_ytdlp_if_needed().await;
-        let _ = self.update_ffmpeg_if_needed().await;
+        // Update each binary if needed
+        match self.update_ytdlp_if_needed().await {
+            Ok(updated) => {
+                if updated {
+                    info!("yt-dlp was updated successfully");
+                }
+            }
+            Err(e) => warn!("Failed to update yt-dlp: {}", e),
+        }
+
+        match self.update_ffmpeg_if_needed().await {
+            Ok(updated) => {
+                if updated {
+                    info!("ffmpeg was updated successfully");
+                }
+            }
+            Err(e) => warn!("Failed to update ffmpeg: {}", e),
+        }
+
+        // Save last check time
+        self.save_last_check()?;
 
         Ok(())
     }
@@ -161,7 +181,7 @@ impl BinaryManager {
                     .unwrap()
                     .as_secs();
 
-                // Check once per day
+                // Check once per day (86400 seconds)
                 return Ok(now - last_check > 86400);
             }
         }
@@ -187,7 +207,7 @@ impl BinaryManager {
         Ok(path.exists())
     }
 
-    /// Get the path for a binary
+    /// Get the path for a binary (platform-aware)
     pub fn get_binary_path(&self, name: &str) -> Result<PathBuf, String> {
         let filename = if cfg!(windows) {
             format!("{}.exe", name)
@@ -196,6 +216,18 @@ impl BinaryManager {
         };
 
         Ok(self.data_dir.join(filename))
+    }
+
+    /// Get the current version of a binary from saved info
+    fn get_current_version(&self, name: &str) -> Option<String> {
+        let info_file = self.data_dir.join(format!("{}-info.json", name));
+        if !info_file.exists() {
+            return None;
+        }
+
+        let content = fs::read_to_string(&info_file).ok()?;
+        let info: BinaryInfo = serde_json::from_str(&content).ok()?;
+        Some(info.version)
     }
 
     /// Download yt-dlp
@@ -287,7 +319,10 @@ impl BinaryManager {
     async fn download_ffmpeg(&self) -> Result<(), String> {
         self.emit_progress("ffmpeg", 0.0, "Downloading ffmpeg...")?;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300)) // 5 min timeout for large files
+            .build()
+            .map_err(|e| e.to_string())?;
 
         // Try multiple sources for reliability
         let sources = self.get_ffmpeg_sources();
@@ -317,7 +352,10 @@ impl BinaryManager {
     async fn download_ffprobe(&self) -> Result<(), String> {
         self.emit_progress("ffprobe", 0.0, "Downloading ffprobe...")?;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .map_err(|e| e.to_string())?;
 
         let sources = self.get_ffprobe_sources();
 
@@ -362,13 +400,14 @@ impl BinaryManager {
 
         let bytes = response.bytes().await.map_err(|e| e.to_string())?;
 
-        self.emit_progress(binary_name, 75.0, "Saving binary...")?;
+        self.emit_progress(binary_name, 75.0, "Extracting binary...")?;
 
-        // Handle zip extraction if needed
-        let final_bytes = if source.is_zip {
-            self.extract_from_zip(&bytes, binary_name)?
-        } else {
-            bytes.to_vec()
+        // Handle archive extraction based on type
+        let final_bytes = match source.archive_type {
+            ArchiveType::None => bytes.to_vec(),
+            ArchiveType::Zip => self.extract_from_zip(&bytes, binary_name)?,
+            ArchiveType::TarXz => self.extract_from_tar_xz(&bytes, binary_name)?,
+            ArchiveType::TarGz => self.extract_from_tar_gz(&bytes, binary_name)?,
         };
 
         // Save binary
@@ -390,7 +429,7 @@ impl BinaryManager {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
+    /// Extract a binary from a ZIP archive
     fn extract_from_zip(&self, bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
         use std::io::Cursor;
         use zip::ZipArchive;
@@ -398,43 +437,113 @@ impl BinaryManager {
         let cursor = Cursor::new(bytes);
         let mut archive = ZipArchive::new(cursor).map_err(|e| format!("Invalid zip: {}", e))?;
 
-        // Look for the binary in the zip
-        let target_name = format!("{}.exe", binary_name);
+        // Determine target filename based on platform
+        let target_name = if cfg!(windows) {
+            format!("{}.exe", binary_name)
+        } else {
+            binary_name.to_string()
+        };
 
+        // Look for the binary in the zip (may be in subdirectory)
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
             let file_name = file.name().to_string();
 
-            if file_name.ends_with(&target_name) {
+            // Check if this file matches our target (handle nested paths)
+            let is_match = file_name.ends_with(&target_name)
+                || file_name.ends_with(&format!("/{}", target_name))
+                || file_name.ends_with(&format!("\\{}", target_name));
+
+            if is_match && !file.is_dir() {
                 let mut buffer = Vec::new();
-                std::io::copy(&mut file, &mut buffer).map_err(|e| e.to_string())?;
+                io::copy(&mut file, &mut buffer).map_err(|e| e.to_string())?;
+                info!("Extracted {} from zip ({})", binary_name, file_name);
                 return Ok(buffer);
             }
         }
 
-        Err(format!("{} not found in zip", target_name))
+        Err(format!("{} not found in zip archive", target_name))
     }
 
-    #[cfg(not(target_os = "windows"))]
-    fn extract_from_zip(&self, bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
+    /// Extract a binary from a tar.xz archive (Linux)
+    fn extract_from_tar_xz(&self, bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
         use std::io::Cursor;
-        use zip::ZipArchive;
+        use xz2::read::XzDecoder;
+        use tar::Archive;
 
+        info!("Extracting {} from tar.xz archive...", binary_name);
+
+        // Decompress XZ
         let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor).map_err(|e| format!("Invalid zip: {}", e))?;
+        let xz_decoder = XzDecoder::new(cursor);
 
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-            let file_name = file.name().to_string();
+        // Open TAR archive
+        let mut archive = Archive::new(xz_decoder);
 
-            if file_name.ends_with(binary_name) || file_name.contains(binary_name) {
+        // Look for the binary in the archive
+        let entries = archive.entries().map_err(|e| format!("Failed to read tar entries: {}", e))?;
+
+        for entry_result in entries {
+            let mut entry = entry_result.map_err(|e| format!("Failed to read entry: {}", e))?;
+            let path_str = {
+                let path = entry.path().map_err(|e| format!("Failed to get path: {}", e))?;
+                path.to_string_lossy().to_string()
+            };
+
+            // Check if this is the binary we want
+            // ffmpeg archives typically have structure like: ffmpeg-6.0-amd64-static/ffmpeg
+            let is_match = path_str.ends_with(&format!("/{}", binary_name))
+                || path_str == binary_name
+                || (path_str.contains(binary_name) && !path_str.contains(".txt") && !path_str.contains(".md"));
+
+            if is_match && entry.header().entry_type().is_file() {
                 let mut buffer = Vec::new();
-                std::io::copy(&mut file, &mut buffer).map_err(|e| e.to_string())?;
+                entry.read_to_end(&mut buffer).map_err(|e| format!("Failed to read entry: {}", e))?;
+                info!("Extracted {} from tar.xz ({})", binary_name, path_str);
                 return Ok(buffer);
             }
         }
 
-        Err(format!("{} not found in zip", binary_name))
+        Err(format!("{} not found in tar.xz archive", binary_name))
+    }
+
+    /// Extract a binary from a tar.gz archive (fallback)
+    fn extract_from_tar_gz(&self, bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
+        use std::io::Cursor;
+        use flate2::read::GzDecoder;
+        use tar::Archive;
+
+        info!("Extracting {} from tar.gz archive...", binary_name);
+
+        // Decompress Gzip
+        let cursor = Cursor::new(bytes);
+        let gz_decoder = GzDecoder::new(cursor);
+
+        // Open TAR archive
+        let mut archive = Archive::new(gz_decoder);
+
+        // Look for the binary
+        let entries = archive.entries().map_err(|e| format!("Failed to read tar entries: {}", e))?;
+
+        for entry_result in entries {
+            let mut entry = entry_result.map_err(|e| format!("Failed to read entry: {}", e))?;
+            let path_str = {
+                let path = entry.path().map_err(|e| format!("Failed to get path: {}", e))?;
+                path.to_string_lossy().to_string()
+            };
+
+            let is_match = path_str.ends_with(&format!("/{}", binary_name))
+                || path_str == binary_name;
+
+            if is_match && entry.header().entry_type().is_file() {
+                let mut buffer = Vec::new();
+                entry.read_to_end(&mut buffer).map_err(|e| format!("Failed to read entry: {}", e))?;
+                info!("Extracted {} from tar.gz ({})", binary_name, path_str);
+                return Ok(buffer);
+            }
+        }
+
+        Err(format!("{} not found in tar.gz archive", binary_name))
     }
 
     fn get_ytdlp_asset_name(&self) -> &str {
@@ -448,7 +557,7 @@ impl BinaryManager {
         return "yt-dlp_macos";
 
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        return "yt-dlp";
+        return "yt-dlp_linux";
 
         #[cfg(not(any(
             all(target_os = "windows", target_arch = "x86_64"),
@@ -463,16 +572,16 @@ impl BinaryManager {
         #[cfg(target_os = "windows")]
         return vec![
             DownloadSource {
-                name: "GyanD/codexffmpeg",
-                url: "https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-essentials_build.zip".to_string(),
-                version: "6.0".to_string(),
-                is_zip: true,
+                name: "gyan.dev",
+                url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".to_string(),
+                version: "latest".to_string(),
+                archive_type: ArchiveType::Zip,
             },
             DownloadSource {
                 name: "BtbN/FFmpeg-Builds",
                 url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip".to_string(),
                 version: "latest".to_string(),
-                is_zip: true,
+                archive_type: ArchiveType::Zip,
             },
         ];
 
@@ -480,9 +589,9 @@ impl BinaryManager {
         return vec![
             DownloadSource {
                 name: "evermeet.cx",
-                url: "https://evermeet.cx/ffmpeg/ffmpeg-6.0.zip".to_string(),
-                version: "6.0".to_string(),
-                is_zip: true,
+                url: "https://evermeet.cx/ffmpeg/getrelease/zip".to_string(),
+                version: "latest".to_string(),
+                archive_type: ArchiveType::Zip,
             },
         ];
 
@@ -492,7 +601,13 @@ impl BinaryManager {
                 name: "johnvansickle.com",
                 url: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz".to_string(),
                 version: "latest".to_string(),
-                is_zip: false,
+                archive_type: ArchiveType::TarXz,
+            },
+            DownloadSource {
+                name: "BtbN/FFmpeg-Builds",
+                url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz".to_string(),
+                version: "latest".to_string(),
+                archive_type: ArchiveType::TarXz,
             },
         ];
     }
@@ -501,10 +616,10 @@ impl BinaryManager {
         #[cfg(target_os = "windows")]
         return vec![
             DownloadSource {
-                name: "GyanD/codexffmpeg",
-                url: "https://github.com/GyanD/codexffmpeg/releases/download/6.0/ffmpeg-6.0-essentials_build.zip".to_string(),
-                version: "6.0".to_string(),
-                is_zip: true,
+                name: "gyan.dev",
+                url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".to_string(),
+                version: "latest".to_string(),
+                archive_type: ArchiveType::Zip,
             },
         ];
 
@@ -512,31 +627,166 @@ impl BinaryManager {
         return vec![
             DownloadSource {
                 name: "evermeet.cx",
-                url: "https://evermeet.cx/ffmpeg/ffprobe-6.0.zip".to_string(),
-                version: "6.0".to_string(),
-                is_zip: true,
+                url: "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip".to_string(),
+                version: "latest".to_string(),
+                archive_type: ArchiveType::Zip,
             },
         ];
 
         #[cfg(target_os = "linux")]
         return vec![
+            // ffprobe is included in the ffmpeg static build
             DownloadSource {
                 name: "johnvansickle.com",
                 url: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz".to_string(),
                 version: "latest".to_string(),
-                is_zip: false,
+                archive_type: ArchiveType::TarXz,
             },
         ];
     }
 
-    async fn update_ytdlp_if_needed(&self) -> Result<(), String> {
-        // Similar to download_ytdlp but checks version first
-        Ok(())
+    /// Check and update yt-dlp if a newer version is available
+    async fn update_ytdlp_if_needed(&self) -> Result<bool, String> {
+        info!("Checking for yt-dlp updates...");
+
+        let client = reqwest::Client::new();
+
+        // Get latest release info
+        let response = client
+            .get("https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest")
+            .header("User-Agent", "ripVID")
+            .send()
+            .await
+            .map_err(|e| format!("Failed to check yt-dlp updates: {}", e))?;
+
+        let release: GitHubRelease = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse release info: {}", e))?;
+
+        // Get current version
+        let current_version = self.get_current_version("yt-dlp");
+
+        if let Some(current) = &current_version {
+            if current == &release.tag_name {
+                info!("yt-dlp is up to date ({})", current);
+                return Ok(false);
+            }
+            info!("yt-dlp update available: {} -> {}", current, release.tag_name);
+        } else {
+            info!("No yt-dlp version info found, will download latest");
+        }
+
+        // Download the update
+        let asset_name = self.get_ytdlp_asset_name();
+        let asset = release
+            .assets
+            .iter()
+            .find(|a| a.name == asset_name)
+            .ok_or_else(|| format!("No asset found for {}", asset_name))?;
+
+        info!("Downloading yt-dlp {}...", release.tag_name);
+
+        let response = client
+            .get(&asset.browser_download_url)
+            .send()
+            .await
+            .map_err(|e| format!("Download failed: {}", e))?;
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read bytes: {}", e))?;
+
+        // Verify checksum
+        let checksums_url = format!(
+            "https://github.com/yt-dlp/yt-dlp/releases/download/{}/SHA2-256SUMS",
+            release.tag_name
+        );
+
+        if let Ok(expected_checksum) = self.fetch_and_parse_checksum(&client, &checksums_url, asset_name).await {
+            let actual_checksum = self.calculate_sha256(&bytes);
+            if actual_checksum.to_lowercase() != expected_checksum.to_lowercase() {
+                return Err(format!(
+                    "Checksum mismatch! Expected: {}, Got: {}",
+                    expected_checksum, actual_checksum
+                ));
+            }
+            info!("Checksum verified for yt-dlp update");
+        } else {
+            warn!("Could not verify checksum, proceeding anyway");
+        }
+
+        // Backup existing binary
+        let path = self.get_binary_path("yt-dlp")?;
+        let backup_path = self.data_dir.join(if cfg!(windows) { "yt-dlp.exe.backup" } else { "yt-dlp.backup" });
+
+        if path.exists() {
+            fs::copy(&path, &backup_path).ok();
+        }
+
+        // Save new binary
+        if let Err(e) = fs::write(&path, &bytes) {
+            // Rollback on failure
+            if backup_path.exists() {
+                fs::copy(&backup_path, &path).ok();
+            }
+            return Err(format!("Failed to save updated binary: {}", e));
+        }
+
+        // Make executable on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&path, permissions)
+                .map_err(|e| format!("Failed to set permissions: {}", e))?;
+        }
+
+        // Clean up backup
+        if backup_path.exists() {
+            fs::remove_file(&backup_path).ok();
+        }
+
+        // Save version info
+        self.save_binary_info("yt-dlp", &release.tag_name, &path)?;
+
+        info!("Successfully updated yt-dlp to {}", release.tag_name);
+        Ok(true)
     }
 
-    async fn update_ffmpeg_if_needed(&self) -> Result<(), String> {
-        // Check if update is available
-        Ok(())
+    /// Check and update ffmpeg if a newer version is available
+    async fn update_ffmpeg_if_needed(&self) -> Result<bool, String> {
+        info!("Checking for ffmpeg updates...");
+
+        // ffmpeg doesn't have frequent breaking updates like yt-dlp
+        // We check if the binary exists and is reasonably recent
+        let ffmpeg_path = self.get_binary_path("ffmpeg")?;
+
+        if !ffmpeg_path.exists() {
+            info!("ffmpeg not found, downloading...");
+            self.download_ffmpeg().await?;
+            return Ok(true);
+        }
+
+        // Check file age - update if older than 30 days
+        if let Ok(metadata) = fs::metadata(&ffmpeg_path) {
+            if let Ok(modified) = metadata.modified() {
+                let age = SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or_default();
+
+                // 30 days in seconds
+                if age.as_secs() > 30 * 24 * 60 * 60 {
+                    info!("ffmpeg is older than 30 days, updating...");
+                    self.download_ffmpeg().await?;
+                    return Ok(true);
+                }
+            }
+        }
+
+        info!("ffmpeg is up to date");
+        Ok(false)
     }
 
     fn save_binary_info(&self, name: &str, version: &str, path: &PathBuf) -> Result<(), String> {
@@ -554,8 +804,6 @@ impl BinaryManager {
         let json = serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?;
 
         fs::write(info_file, json).map_err(|e| e.to_string())?;
-
-        self.save_last_check()?;
 
         Ok(())
     }
@@ -626,9 +874,19 @@ impl BinaryManager {
     }
 }
 
+/// Type of archive for extraction
+#[derive(Debug, Clone)]
+enum ArchiveType {
+    None,
+    Zip,
+    TarXz,
+    TarGz,
+}
+
+/// Download source configuration
 struct DownloadSource {
     name: &'static str,
     url: String,
     version: String,
-    is_zip: bool,
+    archive_type: ArchiveType,
 }
