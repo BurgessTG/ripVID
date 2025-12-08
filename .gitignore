@@ -5,16 +5,26 @@ node_modules/
 dist/
 src-tauri/target/
 
-# Bundled binaries (large files)
+# Bundled binaries (downloaded at runtime)
 src-tauri/binaries/
+
+# Release artifacts (should not be in repo)
+*.AppImage
+*.deb
+*.rpm
+*.exe
+*.dmg
+*.msi
 
 # IDE
 .vscode/
 .idea/
+*.code-workspace
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Logs
 *.log
@@ -36,3 +46,28 @@ logs/
 *.swp
 *.swo
 *~
+.cache/
+
+# Lock files (use bun.lock)
+package-lock.json
+
+# Dev scripts (platform specific)
+*.bat
+*.ps1
+!install.ps1
+
+# Internal documentation (not for public repo)
+*_AUDIT*.md
+*_REPORT*.md
+*_SUMMARY*.md
+*_NOTES*.md
+*_FIXES*.md
+WORKTREE*.md
+DELIVERABLES.md
+GIT_WORKTREES_GUIDE.md
+
+# Duplicate/unnecessary files
+app-icon.svg
+icon.svg
+public/QR*.png
+src-tauri/LICENSE.txt
