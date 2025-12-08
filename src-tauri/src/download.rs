@@ -1,14 +1,11 @@
 use crate::binary_manager::BinaryManager;
 use crate::errors::{
     is_auth_error, is_dpapi_error, is_ffmpeg_error, is_network_error, is_rate_limit_error,
-    is_retryable_error, DownloadError,
+    DownloadError,
 };
-use crate::ytdlp_updater::YtdlpUpdater;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
@@ -266,9 +263,9 @@ fn build_ytdlp_args(
     let mut args = vec![
         url.to_string(),
         "--no-playlist".to_string(),
-        // Enable deno JS runtime for YouTube extraction (required since yt-dlp 2025+)
+        // Use Bun JS runtime for YouTube extraction (already installed for build system)
         "--js-runtimes".to_string(),
-        "deno".to_string(),
+        "bun".to_string(),
     ];
 
     // Add ffmpeg location using binary manager
@@ -362,41 +359,6 @@ fn parse_progress(line: &str) -> Option<DownloadProgress> {
     })
 }
 
-/// Retry a download operation with exponential backoff
-async fn retry_with_backoff<F, Fut, T>(operation: F, max_attempts: u32) -> Result<T, DownloadError>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T, DownloadError>>,
-{
-    let mut attempts = 0;
-    let mut delay = Duration::from_secs(1);
-
-    loop {
-        attempts += 1;
-        debug!("Attempt {} of {}", attempts, max_attempts);
-
-        match operation().await {
-            Ok(result) => return Ok(result),
-            Err(error) => {
-                if attempts >= max_attempts || !is_retryable_error(&error) {
-                    error!("Operation failed after {} attempts: {}", attempts, error);
-                    return Err(error);
-                }
-
-                warn!(
-                    "Attempt {} failed: {}. Retrying in {:?}...",
-                    attempts, error, delay
-                );
-
-                tokio::time::sleep(delay).await;
-
-                // Exponential backoff: 1s, 2s, 4s, 8s, etc.
-                delay *= 2;
-            }
-        }
-    }
-}
-
 /// Unified download function for both video and audio
 pub async fn download_content(
     url: String,
@@ -405,7 +367,6 @@ pub async fn download_content(
     browser_config: BrowserConfig,
     window: tauri::WebviewWindow,
     app: AppHandle,
-    ytdlp_updater: Arc<Mutex<YtdlpUpdater>>,
     active_downloads: Arc<Mutex<std::collections::HashMap<String, DownloadHandle>>>,
     binary_manager: Arc<BinaryManager>,
 ) -> Result<String, DownloadError> {
@@ -420,56 +381,33 @@ pub async fn download_content(
     let args = build_ytdlp_args(&url, &output_path, &download_type, &browser_config, &binary_manager);
     debug!("yt-dlp args prepared (count: {})", args.len());
 
-    // Get yt-dlp path with retry
-    let ytdlp_path = retry_with_backoff(
-        || async {
-            let updater = ytdlp_updater.lock().await;
-            updater
-                .ensure_updated()
-                .await
-                .map_err(|e| DownloadError::ProcessFailed(format!("Failed to get yt-dlp: {}", e)))
-        },
-        3,
-    )
-    .await
-    .unwrap_or_else(|_| PathBuf::from("yt-dlp"));
+    // Get yt-dlp path from binary manager
+    let ytdlp_path = binary_manager.get_binary_path("yt-dlp").ok();
 
-    // Get binaries directory to add to PATH (for deno)
-    let binaries_dir = binary_manager
-        .get_binary_path("deno")
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-
-    // Build modified PATH with our binaries directory
-    let modified_path = if let Some(ref bin_dir) = binaries_dir {
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        let bin_dir_str = bin_dir.to_string_lossy();
-        #[cfg(target_os = "windows")]
-        let new_path = format!("{};{}", bin_dir_str, current_path);
-        #[cfg(not(target_os = "windows"))]
-        let new_path = format!("{}:{}", bin_dir_str, current_path);
-        info!("✓ Added bundled binaries to PATH: {}", bin_dir_str);
-        new_path
+    // Spawn yt-dlp process (Bun is used as JS runtime, already in system PATH)
+    let (mut rx, child) = if let Some(path) = ytdlp_path {
+        if path.exists() {
+            info!("Using downloaded yt-dlp from: {:?}", path);
+            app.shell()
+                .command(path)
+                .args(&args)
+                .spawn()
+                .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
+        } else {
+            info!("Using bundled yt-dlp sidecar (downloaded binary not found)");
+            app.shell()
+                .sidecar("yt-dlp")
+                .map_err(|e| DownloadError::Sidecar(e.to_string()))?
+                .args(&args)
+                .spawn()
+                .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
+        }
     } else {
-        std::env::var("PATH").unwrap_or_default()
-    };
-
-    // Spawn yt-dlp process
-    let (mut rx, child) = if ytdlp_path == PathBuf::from("yt-dlp") {
         info!("Using bundled yt-dlp sidecar");
         app.shell()
             .sidecar("yt-dlp")
             .map_err(|e| DownloadError::Sidecar(e.to_string()))?
             .args(&args)
-            .env("PATH", &modified_path)
-            .spawn()
-            .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
-    } else {
-        info!("Using updated yt-dlp from: {:?}", ytdlp_path);
-        app.shell()
-            .command(ytdlp_path)
-            .args(&args)
-            .env("PATH", &modified_path)
             .spawn()
             .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
     };
@@ -640,7 +578,6 @@ pub async fn download_content_with_smart_retry(
     download_type: DownloadType,
     window: tauri::WebviewWindow,
     app: AppHandle,
-    ytdlp_updater: Arc<Mutex<YtdlpUpdater>>,
     active_downloads: Arc<Mutex<std::collections::HashMap<String, DownloadHandle>>>,
     binary_manager: Arc<BinaryManager>,
 ) -> Result<String, DownloadError> {
@@ -660,7 +597,6 @@ pub async fn download_content_with_smart_retry(
         browser_config,
         window.clone(),
         app.clone(),
-        ytdlp_updater.clone(),
         active_downloads.clone(),
         binary_manager.clone(),
     )
@@ -716,7 +652,6 @@ pub async fn download_content_with_smart_retry(
             browser_config,
             window.clone(),
             app.clone(),
-            ytdlp_updater.clone(),
             active_downloads.clone(),
             binary_manager.clone(),
         )
