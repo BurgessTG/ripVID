@@ -263,7 +263,13 @@ fn build_ytdlp_args(
     browser_config: &BrowserConfig,
     binary_manager: &BinaryManager,
 ) -> Vec<String> {
-    let mut args = vec![url.to_string(), "--no-playlist".to_string()];
+    let mut args = vec![
+        url.to_string(),
+        "--no-playlist".to_string(),
+        // Enable deno JS runtime for YouTube extraction (required since yt-dlp 2025+)
+        "--js-runtimes".to_string(),
+        "deno".to_string(),
+    ];
 
     // Add ffmpeg location using binary manager
     match binary_manager.get_binary_path("ffmpeg") {

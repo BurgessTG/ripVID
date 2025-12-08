@@ -704,6 +704,26 @@ function App() {
                         <h3>Settings</h3>
                     </div>
                     <div className="settings-content">
+                        {/* Format Toggle */}
+                        <div className="setting-group">
+                            <label>Download Format</label>
+                            <div className="format-toggle">
+                                <button
+                                    className={`format-option ${downloadFormat === "mp4" ? "active" : ""}`}
+                                    onClick={() => handleFormatChange("mp4")}
+                                >
+                                    🎬 Video (MP4)
+                                </button>
+                                <button
+                                    className={`format-option ${downloadFormat === "mp3" ? "active" : ""}`}
+                                    onClick={() => handleFormatChange("mp3")}
+                                >
+                                    🎵 Audio (MP3)
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Video Quality - only for MP4 */}
                         {downloadFormat === "mp4" && (
                             <div className="setting-group">
                                 <label>Video Quality</label>
@@ -728,7 +748,12 @@ function App() {
                                 </div>
                             </div>
                         )}
-                        {/* Cookie toggle removed - smart retry handles authentication automatically */}
+
+                        {/* Info section */}
+                        <div className="setting-group">
+                            <label>Download Location</label>
+                            <div className="setting-info">~/ripVID/{downloadFormat.toUpperCase()}/</div>
+                        </div>
                     </div>
                 </div>
 
