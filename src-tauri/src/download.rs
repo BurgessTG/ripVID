@@ -263,9 +263,9 @@ fn build_ytdlp_args(
     let mut args = vec![
         url.to_string(),
         "--no-playlist".to_string(),
-        // Enable deno JS runtime for YouTube extraction (required since yt-dlp 2025+)
+        // Use Bun JS runtime for YouTube extraction (already installed for build system)
         "--js-runtimes".to_string(),
-        "deno".to_string(),
+        "bun".to_string(),
     ];
 
     // Add ffmpeg location using binary manager
@@ -384,34 +384,13 @@ pub async fn download_content(
     // Get yt-dlp path from binary manager
     let ytdlp_path = binary_manager.get_binary_path("yt-dlp").ok();
 
-    // Get binaries directory to add to PATH (for deno)
-    let binaries_dir = binary_manager
-        .get_binary_path("deno")
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-
-    // Build modified PATH with our binaries directory
-    let modified_path = if let Some(ref bin_dir) = binaries_dir {
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        let bin_dir_str = bin_dir.to_string_lossy();
-        #[cfg(target_os = "windows")]
-        let new_path = format!("{};{}", bin_dir_str, current_path);
-        #[cfg(not(target_os = "windows"))]
-        let new_path = format!("{}:{}", bin_dir_str, current_path);
-        info!("✓ Added bundled binaries to PATH: {}", bin_dir_str);
-        new_path
-    } else {
-        std::env::var("PATH").unwrap_or_default()
-    };
-
-    // Spawn yt-dlp process
+    // Spawn yt-dlp process (Bun is used as JS runtime, already in system PATH)
     let (mut rx, child) = if let Some(path) = ytdlp_path {
         if path.exists() {
             info!("Using downloaded yt-dlp from: {:?}", path);
             app.shell()
                 .command(path)
                 .args(&args)
-                .env("PATH", &modified_path)
                 .spawn()
                 .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
         } else {
@@ -420,7 +399,6 @@ pub async fn download_content(
                 .sidecar("yt-dlp")
                 .map_err(|e| DownloadError::Sidecar(e.to_string()))?
                 .args(&args)
-                .env("PATH", &modified_path)
                 .spawn()
                 .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
         }
@@ -430,7 +408,6 @@ pub async fn download_content(
             .sidecar("yt-dlp")
             .map_err(|e| DownloadError::Sidecar(e.to_string()))?
             .args(&args)
-            .env("PATH", &modified_path)
             .spawn()
             .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
     };

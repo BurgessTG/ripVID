@@ -66,7 +66,7 @@ impl BinaryManager {
         fs::create_dir_all(&self.data_dir)
             .map_err(|e| format!("Failed to create binaries directory: {}", e))?;
 
-        // Check each binary
+        // Check each binary (yt-dlp, ffmpeg, ffprobe - Bun used for JS runtime instead of Deno)
         let mut missing = Vec::new();
 
         if !self.is_binary_present("yt-dlp")? {
@@ -78,9 +78,6 @@ impl BinaryManager {
         if !self.is_binary_present("ffprobe")? {
             missing.push("ffprobe");
         }
-        if !self.is_binary_present("deno")? {
-            missing.push("deno");
-        }
 
         // If any are missing, download them (first run)
         if !missing.is_empty() {
@@ -91,17 +88,15 @@ impl BinaryManager {
             let manager1 = self.clone_for_background();
             let manager2 = self.clone_for_background();
             let manager3 = self.clone_for_background();
-            let manager4 = self.clone_for_background();
 
             let handles = vec![
                 tokio::spawn(async move { manager1.download_ytdlp().await }),
                 tokio::spawn(async move { manager2.download_ffmpeg().await }),
                 tokio::spawn(async move { manager3.download_ffprobe().await }),
-                tokio::spawn(async move { manager4.download_deno().await }),
             ];
 
             let mut errors = Vec::new();
-            const BINARY_NAMES: [&str; 4] = ["yt-dlp", "ffmpeg", "ffprobe", "deno"];
+            const BINARY_NAMES: [&str; 3] = ["yt-dlp", "ffmpeg", "ffprobe"];
             for (i, handle) in handles.into_iter().enumerate() {
                 let binary_name = BINARY_NAMES[i];
                 match handle.await {
@@ -163,15 +158,6 @@ impl BinaryManager {
                 }
             }
             Err(e) => warn!("Failed to update ffmpeg: {}", e),
-        }
-
-        match self.update_deno_if_needed().await {
-            Ok(updated) => {
-                if updated {
-                    info!("Deno was updated successfully");
-                }
-            }
-            Err(e) => warn!("Failed to update Deno: {}", e),
         }
 
         // Save last check time
@@ -393,98 +379,6 @@ impl BinaryManager {
 
         Err("All ffprobe sources failed".to_string())
     }
-
-    /// Download Deno (required for yt-dlp YouTube extraction since 2025)
-    async fn download_deno(&self) -> Result<(), String> {
-        self.emit_progress("deno", 0.0, "Downloading Deno...")?;
-
-        let client = reqwest::Client::new();
-
-        // Get latest release from GitHub
-        let response = client
-            .get("https://api.github.com/repos/denoland/deno/releases/latest")
-            .header("User-Agent", "ripVID")
-            .send()
-            .await
-            .map_err(|e| format!("Failed to fetch Deno release: {}", e))?;
-
-        let release: GitHubRelease = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse release: {}", e))?;
-
-        // Find the right asset for this platform
-        let asset_name = self.get_deno_asset_name();
-        let asset = release
-            .assets
-            .iter()
-            .find(|a| a.name == asset_name)
-            .ok_or_else(|| format!("No Deno asset found for {}", asset_name))?;
-
-        self.emit_progress("deno", 25.0, "Downloading binary...")?;
-
-        // Download the zip
-        let response = client
-            .get(&asset.browser_download_url)
-            .send()
-            .await
-            .map_err(|e| format!("Download failed: {}", e))?;
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| format!("Failed to read bytes: {}", e))?;
-
-        self.emit_progress("deno", 75.0, "Extracting...")?;
-
-        // Extract from zip (all Deno releases are zip files)
-        let final_bytes = self.extract_from_zip(&bytes, "deno")?;
-
-        // Save binary
-        let path = self.get_binary_path("deno")?;
-        fs::write(&path, final_bytes).map_err(|e| format!("Failed to save: {}", e))?;
-
-        // Make executable on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let permissions = fs::Permissions::from_mode(0o755);
-            fs::set_permissions(&path, permissions)
-                .map_err(|e| format!("Failed to set permissions: {}", e))?;
-        }
-
-        // Save version info
-        self.save_binary_info("deno", &release.tag_name, &path)?;
-
-        self.emit_progress("deno", 100.0, "Ready!")?;
-
-        info!("Deno {} installed successfully", release.tag_name);
-
-        Ok(())
-    }
-
-    fn get_deno_asset_name(&self) -> &str {
-        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        return "deno-x86_64-pc-windows-msvc.zip";
-
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        return "deno-x86_64-apple-darwin.zip";
-
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        return "deno-aarch64-apple-darwin.zip";
-
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        return "deno-x86_64-unknown-linux-gnu.zip";
-
-        #[cfg(not(any(
-            all(target_os = "windows", target_arch = "x86_64"),
-            all(target_os = "macos", target_arch = "x86_64"),
-            all(target_os = "macos", target_arch = "aarch64"),
-            all(target_os = "linux", target_arch = "x86_64")
-        )))]
-        return "deno-x86_64-unknown-linux-gnu.zip";
-    }
-
     async fn download_from_source(
         &self,
         client: &reqwest::Client,
@@ -891,38 +785,6 @@ impl BinaryManager {
         }
 
         info!("ffmpeg is up to date");
-        Ok(false)
-    }
-
-    /// Check and update Deno if a newer version is available
-    async fn update_deno_if_needed(&self) -> Result<bool, String> {
-        info!("Checking for Deno updates...");
-
-        let deno_path = self.get_binary_path("deno")?;
-
-        if !deno_path.exists() {
-            info!("Deno not found, downloading...");
-            self.download_deno().await?;
-            return Ok(true);
-        }
-
-        // Check file age - update if older than 30 days
-        if let Ok(metadata) = fs::metadata(&deno_path) {
-            if let Ok(modified) = metadata.modified() {
-                let age = SystemTime::now()
-                    .duration_since(modified)
-                    .unwrap_or_default();
-
-                // 30 days in seconds
-                if age.as_secs() > 30 * 24 * 60 * 60 {
-                    info!("Deno is older than 30 days, updating...");
-                    self.download_deno().await?;
-                    return Ok(true);
-                }
-            }
-        }
-
-        info!("Deno is up to date");
         Ok(false)
     }
 
