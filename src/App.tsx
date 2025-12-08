@@ -80,15 +80,20 @@ function App() {
         platform: string;
         format: "mp3" | "mp4";
     } | null>(null);
+    const lastProgressUpdate = useRef<number>(0);
 
     useEffect(() => {
-        // Listen for download progress
+        // Listen for download progress (debounced to 100ms to prevent excessive re-renders)
         const progressUnsubscribe = listen<DownloadProgress>(
             "download-progress",
             (event) => {
-                console.log("Progress event:", event.payload);
-                setProgress(event.payload);
-                setStatus("downloading");
+                const now = Date.now();
+                // Only update progress every 100ms to avoid performance issues
+                if (now - lastProgressUpdate.current >= 100) {
+                    lastProgressUpdate.current = now;
+                    setProgress(event.payload);
+                    setStatus("downloading");
+                }
             },
         );
 
@@ -132,10 +137,21 @@ function App() {
                 downloadInfoRef.current
             ) {
                 // Verify file actually exists before adding to archive
+                // Add small delay to ensure file is fully written
+                const verifyFileExists = async (retries = 3): Promise<boolean> => {
+                    for (let i = 0; i < retries; i++) {
+                        const exists = await invoke<boolean>("file_exists", {
+                            path: event.payload.path,
+                        });
+                        if (exists) return true;
+                        // Wait 500ms before retry
+                        await new Promise(r => setTimeout(r, 500));
+                    }
+                    return false;
+                };
+
                 try {
-                    const exists = await invoke<boolean>("file_exists", {
-                        path: event.payload.path,
-                    });
+                    const exists = await verifyFileExists();
 
                     if (exists) {
                         // Add to archive with fileExists flag
@@ -152,13 +168,15 @@ function App() {
                             fileExists: true,
                         };
 
-                        const newArchive = [newItem, ...archive];
-                        setArchive(newArchive);
-                        localStorage.setItem(
-                            "ripvid-archive",
-                            JSON.stringify(newArchive),
-                        );
-                        console.log("Added to archive:", newItem);
+                        setArchive(prevArchive => {
+                            const newArchive = [newItem, ...prevArchive];
+                            localStorage.setItem(
+                                "ripvid-archive",
+                                JSON.stringify(newArchive),
+                            );
+                            console.log("Added to archive:", newItem);
+                            return newArchive;
+                        });
                     } else {
                         console.warn(
                             "File not found after download:",
@@ -756,24 +774,28 @@ function App() {
                     </div>
                 </div>
 
-                {!archiveOpen && !showSettings && (
-                    <>
-                        <button
-                            className="settings-toggle"
-                            onClick={() => setShowSettings(true)}
-                            aria-label="Open settings"
-                        >
-                            ⚙
-                        </button>
-                        <button
-                            className="archive-toggle"
-                            onClick={() => setArchiveOpen(true)}
-                            aria-label="Open archive"
-                        >
-                            <Save size={18} />
-                        </button>
-                    </>
-                )}
+                {/* Settings toggle - always visible */}
+                <button
+                    className={`settings-toggle ${showSettings ? "active" : ""}`}
+                    onClick={() => {
+                        setShowSettings(!showSettings);
+                        if (!showSettings) setArchiveOpen(false);
+                    }}
+                    aria-label={showSettings ? "Close settings" : "Open settings"}
+                >
+                    ⚙
+                </button>
+                {/* Archive toggle - always visible */}
+                <button
+                    className={`archive-toggle ${archiveOpen ? "active" : ""}`}
+                    onClick={() => {
+                        setArchiveOpen(!archiveOpen);
+                        if (!archiveOpen) setShowSettings(false);
+                    }}
+                    aria-label={archiveOpen ? "Close archive" : "Open archive"}
+                >
+                    <Save size={18} />
+                </button>
 
                 <div
                     ref={archivePanelRef}
