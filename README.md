@@ -56,20 +56,12 @@ bun run tauri:build
 
 - **Frontend:** React, TypeScript, Tailwind CSS, Vite
 - **Backend:** Tauri v2, Rust, tokio
-- **Tools:** yt-dlp, ffmpeg (auto-downloaded)
-
-## Requirements
-
-- **YouTube downloads** require [Deno](https://deno.land/) runtime (yt-dlp uses it for JavaScript extraction)
-  - **Windows/macOS:** Deno is auto-downloaded if needed (coming soon)
-  - **Linux:** Install manually: `sudo pacman -S deno` or `curl -fsSL https://deno.land/install.sh | sh`
-  - **Arch Linux:** Installed automatically as optional dependency
+- **Tools:** yt-dlp, ffmpeg, deno (all auto-downloaded on first launch)
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| YouTube download fails | Install Deno: `sudo pacman -S deno` (Linux) |
 | Binary download fails | Check internet, allow GitHub access through firewall |
 | Download fails | Verify URL, app auto-retries with browser cookies |
 | Update issues | Download latest from Releases manually |

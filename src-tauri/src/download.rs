@@ -434,6 +434,26 @@ pub async fn download_content(
     .await
     .unwrap_or_else(|_| PathBuf::from("yt-dlp"));
 
+    // Get binaries directory to add to PATH (for deno)
+    let binaries_dir = binary_manager
+        .get_binary_path("deno")
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+    // Build modified PATH with our binaries directory
+    let modified_path = if let Some(ref bin_dir) = binaries_dir {
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let bin_dir_str = bin_dir.to_string_lossy();
+        #[cfg(target_os = "windows")]
+        let new_path = format!("{};{}", bin_dir_str, current_path);
+        #[cfg(not(target_os = "windows"))]
+        let new_path = format!("{}:{}", bin_dir_str, current_path);
+        info!("✓ Added bundled binaries to PATH: {}", bin_dir_str);
+        new_path
+    } else {
+        std::env::var("PATH").unwrap_or_default()
+    };
+
     // Spawn yt-dlp process
     let (mut rx, child) = if ytdlp_path == PathBuf::from("yt-dlp") {
         info!("Using bundled yt-dlp sidecar");
@@ -441,6 +461,7 @@ pub async fn download_content(
             .sidecar("yt-dlp")
             .map_err(|e| DownloadError::Sidecar(e.to_string()))?
             .args(&args)
+            .env("PATH", &modified_path)
             .spawn()
             .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
     } else {
@@ -448,6 +469,7 @@ pub async fn download_content(
         app.shell()
             .command(ytdlp_path)
             .args(&args)
+            .env("PATH", &modified_path)
             .spawn()
             .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
     };
