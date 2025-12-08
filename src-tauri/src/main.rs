@@ -17,18 +17,14 @@ mod download;
 mod errors;
 mod logging;
 mod validation;
-mod ytdlp_updater;
 
 use binary_manager::BinaryManager;
 use download::{
     cancel_download, download_content_with_smart_retry, DownloadHandle, DownloadType,
 };
-// validation module available if needed
-use ytdlp_updater::YtdlpUpdater;
 
 /// Application state shared across all commands
 struct AppState {
-    ytdlp_updater: Arc<Mutex<YtdlpUpdater>>,
     active_downloads: Arc<Mutex<HashMap<String, DownloadHandle>>>,
     binary_manager: Arc<BinaryManager>,
 }
@@ -106,7 +102,6 @@ async fn download_video(
         DownloadType::Video { quality },
         window,
         app,
-        state.ytdlp_updater.clone(),
         state.active_downloads.clone(),
         state.binary_manager.clone(),
     )
@@ -134,7 +129,6 @@ async fn download_audio(
         DownloadType::Audio,
         window,
         app,
-        state.ytdlp_updater.clone(),
         state.active_downloads.clone(),
         state.binary_manager.clone(),
     )
@@ -475,21 +469,8 @@ fn main() {
                 Ok::<(), String>(())
             })?;
 
-            // Initialize yt-dlp updater (legacy - will be replaced by binary manager)
-            let updater = YtdlpUpdater::new(app.handle().clone());
-
-            // Check for updates on startup (non-blocking)
-            let updater_clone = updater.clone_for_background();
-            tauri::async_runtime::spawn(async move {
-                match updater_clone.ensure_updated().await {
-                    Ok(path) => info!("yt-dlp ready at: {:?}", path),
-                    Err(e) => warn!("Failed to update yt-dlp: {}", e),
-                }
-            });
-
             // Initialize app state
             app.manage(AppState {
-                ytdlp_updater: Arc::new(Mutex::new(updater)),
                 active_downloads: Arc::new(Mutex::new(HashMap::new())),
                 binary_manager: binary_manager.clone(),
             });

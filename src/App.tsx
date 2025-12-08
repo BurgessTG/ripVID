@@ -67,7 +67,6 @@ function App() {
     );
     const [showTerms, setShowTerms] = useState(false);
     const [quality, setQuality] = useState<string>("best");
-    const [useBrowserCookies, setUseBrowserCookies] = useState(false); // Deprecated - smart retry handles this automatically
     const [currentDownloadId, setCurrentDownloadId] = useState<string | null>(
         null,
     );
@@ -250,11 +249,6 @@ function App() {
             if (savedQuality) {
                 setQuality(savedQuality);
             }
-            // Load cookie preference
-            const savedCookies = localStorage.getItem("ripvid-use-cookies");
-            if (savedCookies === "true") {
-                setUseBrowserCookies(true);
-            }
         };
 
         initializeApp();
@@ -355,7 +349,6 @@ function App() {
             platform,
             format: downloadFormat,
             quality,
-            cookies: useBrowserCookies,
         });
 
         setIsDownloading(true);
@@ -379,7 +372,6 @@ function App() {
                 const downloadId = await invoke<string>("download_audio", {
                     url: url.trim(),
                     outputPath: savePath,
-                    useBrowserCookies: useBrowserCookies,
                 });
                 console.log("Audio download started with ID:", downloadId);
             } else {
@@ -388,7 +380,6 @@ function App() {
                     url: url.trim(),
                     outputPath: savePath,
                     quality: quality,
-                    useBrowserCookies: useBrowserCookies,
                 });
                 console.log("Video download started with ID:", downloadId);
             }
@@ -601,8 +592,6 @@ function App() {
         setDownloadFormat(newFormat);
         localStorage.setItem("ripvid-format", newFormat);
     };
-
-    // handleCookieToggle removed - smart retry handles authentication automatically
 
     const getFilteredArchive = () => {
         if (archiveTab === "all") return archive;
