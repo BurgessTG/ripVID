@@ -372,7 +372,7 @@ async fn scan_downloads_folder() -> Result<Vec<serde_json::Value>, String> {
     use serde_json::json;
 
     let home = dirs::home_dir().ok_or("Could not determine home directory")?;
-    let ripvid_base = home.join("Videos").join("ripVID");
+    let ripvid_base = home.join("ripVID");
 
     let mut files = Vec::new();
 

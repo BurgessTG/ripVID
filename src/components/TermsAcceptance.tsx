@@ -16,7 +16,7 @@ export function TermsAcceptance({ onAccept, onDecline }: TermsAcceptanceProps) {
   }
 
   const openGitHub = () => {
-    window.open('https://github.com/BurgessTheGamer/ripVID/blob/main/TERMS.md', '_blank')
+    window.open('https://github.com/BurgessTG/ripVID/blob/main/TERMS.md', '_blank')
   }
 
   return (

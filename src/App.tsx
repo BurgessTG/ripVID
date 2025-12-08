@@ -315,7 +315,7 @@ function App() {
     const getDownloadPath = async () => {
         const home = await homeDir();
         const formatFolder = downloadFormat.toUpperCase();
-        const ripvidDir = await join(home, "Videos", "ripVID", formatFolder);
+        const ripvidDir = await join(home, "ripVID", formatFolder);
 
         // Create directory if it doesn't exist
         await invoke("create_directory", { path: ripvidDir });
@@ -467,7 +467,7 @@ function App() {
     const setupFolderStructure = async () => {
         try {
             const home = await homeDir();
-            const ripvidDir = await join(home, "Videos", "ripVID");
+            const ripvidDir = await join(home, "ripVID");
             const mp4Dir = await join(ripvidDir, "MP4");
             const mp3Dir = await join(ripvidDir, "MP3");
 
