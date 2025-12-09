@@ -1,11 +1,11 @@
 # Maintainer: BurgessTG <your-email@example.com>
 pkgname=ripvid
-pkgver=2.2.0
+pkgver=2.2.4
 pkgrel=1
 pkgdesc="A beautiful, modern desktop application for downloading videos from YouTube, X/Twitter, and 1000+ sites"
 arch=('x86_64')
 url="https://github.com/BurgessTG/ripVID"
-license=('MIT')
+license=('Apache-2.0')
 depends=(
     'webkit2gtk-4.1'
     'gtk3'
@@ -20,8 +20,7 @@ depends=(
 makedepends=(
     'rust'
     'cargo'
-    'nodejs'
-    'npm'
+    'bun'
     'webkit2gtk-4.1'
     'base-devel'
     'curl'
@@ -46,11 +45,11 @@ sha256sums=('SKIP')
 prepare() {
     cd "ripVID-$pkgver"
 
-    # Install npm dependencies
-    npm install
+    # Install dependencies with bun
+    bun install
 
     # Build frontend
-    npm run build
+    bun run build
 }
 
 build() {

@@ -5,7 +5,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$VERSION = "2.2.0"
+$VERSION = "2.2.4"
 $REPO = "BurgessTG/ripVID"
 $INSTALLER_URL = "https://github.com/$REPO/releases/download/v$VERSION/ripVID_${VERSION}_x64-setup.exe"
 $TEMP_FILE = "$env:TEMP\ripVID-setup.exe"

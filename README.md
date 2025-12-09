@@ -56,7 +56,7 @@ bun run tauri:build
 
 - **Frontend:** React, TypeScript, Tailwind CSS, Vite
 - **Backend:** Tauri v2, Rust, tokio
-- **Tools:** yt-dlp, ffmpeg, deno (all auto-downloaded on first launch)
+- **Tools:** yt-dlp, ffmpeg (auto-downloaded on first launch)
 
 ## Troubleshooting
 

@@ -6,7 +6,7 @@
 
 set -e
 
-VERSION="2.2.0"
+VERSION="2.2.4"
 REPO="BurgessTG/ripVID"
 INSTALL_DIR="/usr/local/bin"
 APP_NAME="ripvid"

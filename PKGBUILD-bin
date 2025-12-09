@@ -1,7 +1,7 @@
 # Maintainer: BurgessTG <your-email@example.com>
 # This is the binary package - no compilation required
 pkgname=ripvid-bin
-pkgver=2.2.0
+pkgver=2.2.4
 pkgrel=1
 pkgdesc="A beautiful, modern desktop application for downloading videos from YouTube, X/Twitter, and 1000+ sites (prebuilt binary)"
 arch=('x86_64')
