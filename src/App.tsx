@@ -213,7 +213,8 @@ function App() {
             completeUnsubscribe.then((fn) => fn());
             cancelledUnsubscribe.then((fn) => fn());
         };
-    }, [archive]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); // Empty deps - listeners should only be set up once on mount
 
     useEffect(() => {
         // Initialize app and check first launch

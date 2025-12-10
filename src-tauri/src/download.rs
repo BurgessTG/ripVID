@@ -268,20 +268,23 @@ fn build_ytdlp_args(
         "bun".to_string(),
     ];
 
-    // Add ffmpeg location using binary manager
+    // Add ffmpeg location using binary manager (only if binary actually exists)
     match binary_manager.get_binary_path("ffmpeg") {
         Ok(ffmpeg_path) => {
-            if let Some(ffmpeg_dir) = ffmpeg_path.parent() {
-                let ffmpeg_path_str = strip_extended_path_prefix(ffmpeg_dir);
-                args.push("--ffmpeg-location".to_string());
-                args.push(ffmpeg_path_str.clone());
-                info!("✓ Using runtime-downloaded ffmpeg at: {}", ffmpeg_path_str);
+            // Only pass --ffmpeg-location if the binary actually exists
+            if ffmpeg_path.exists() {
+                if let Some(ffmpeg_dir) = ffmpeg_path.parent() {
+                    let ffmpeg_path_str = strip_extended_path_prefix(ffmpeg_dir);
+                    args.push("--ffmpeg-location".to_string());
+                    args.push(ffmpeg_path_str.clone());
+                    info!("✓ Using runtime-downloaded ffmpeg at: {}", ffmpeg_path_str);
+                }
             } else {
-                warn!("Could not determine ffmpeg directory");
+                info!("Bundled ffmpeg not found, using system ffmpeg");
             }
         }
         Err(e) => {
-            warn!("Could not get ffmpeg path: {}. yt-dlp will use system ffmpeg if available", e);
+            info!("Using system ffmpeg (binary manager: {})", e);
         }
     }
 
