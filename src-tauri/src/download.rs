@@ -268,24 +268,55 @@ fn build_ytdlp_args(
         "bun".to_string(),
     ];
 
-    // Add ffmpeg location using binary manager (only if binary actually exists)
-    match binary_manager.get_binary_path("ffmpeg") {
-        Ok(ffmpeg_path) => {
-            // Only pass --ffmpeg-location if the binary actually exists
+    // Add ffmpeg location - try bundled first, then system ffmpeg
+    let ffmpeg_dir = match binary_manager.get_binary_path("ffmpeg") {
+        Ok(ffmpeg_path) if ffmpeg_path.exists() => {
+            ffmpeg_path.parent().map(|p| p.to_path_buf())
+        }
+        _ => None,
+    };
+
+    // If no bundled ffmpeg, check for system ffmpeg
+    let ffmpeg_dir = ffmpeg_dir.or_else(|| {
+        // Check common system locations
+        let system_paths = [
+            "/usr/bin",
+            "/usr/local/bin",
+            "/opt/homebrew/bin",  // macOS Homebrew
+        ];
+
+        for path in &system_paths {
+            let ffmpeg_path = std::path::Path::new(path).join("ffmpeg");
             if ffmpeg_path.exists() {
-                if let Some(ffmpeg_dir) = ffmpeg_path.parent() {
-                    let ffmpeg_path_str = strip_extended_path_prefix(ffmpeg_dir);
-                    args.push("--ffmpeg-location".to_string());
-                    args.push(ffmpeg_path_str.clone());
-                    info!("✓ Using runtime-downloaded ffmpeg at: {}", ffmpeg_path_str);
-                }
-            } else {
-                info!("Bundled ffmpeg not found, using system ffmpeg");
+                info!("✓ Found system ffmpeg at: {}", path);
+                return Some(std::path::PathBuf::from(*path));
             }
         }
-        Err(e) => {
-            info!("Using system ffmpeg (binary manager: {})", e);
+
+        // On Windows, check PATH
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(path_var) = std::env::var("PATH") {
+                for path in path_var.split(';') {
+                    let ffmpeg_path = std::path::Path::new(path).join("ffmpeg.exe");
+                    if ffmpeg_path.exists() {
+                        info!("✓ Found system ffmpeg at: {}", path);
+                        return Some(std::path::PathBuf::from(path));
+                    }
+                }
+            }
         }
+
+        None
+    });
+
+    if let Some(dir) = ffmpeg_dir {
+        let ffmpeg_path_str = strip_extended_path_prefix(&dir);
+        args.push("--ffmpeg-location".to_string());
+        args.push(ffmpeg_path_str.clone());
+        info!("✓ Using ffmpeg from: {}", ffmpeg_path_str);
+    } else {
+        warn!("⚠ ffmpeg not found - audio conversion may not work");
     }
 
     // Add format-specific arguments
