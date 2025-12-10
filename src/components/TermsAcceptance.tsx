@@ -74,10 +74,9 @@ export function TermsAcceptance({ onAccept, onDecline }: TermsAcceptanceProps) {
             locally on your device.
           </p>
 
-          <h3>6. Copyright Notice</h3>
+          <h3>6. License</h3>
           <p>
-            Copyright (c) 2024 ripVID. All rights reserved.<br />
-            Licensed under the Apache License, Version 2.0
+            ripVID 2025 - Released under Apache License 2.0
           </p>
 
           <div className="terms-scroll-hint">

@@ -46,5 +46,4 @@ By installing ripVID, you confirm that you have read and agree to these terms.
 
 For the full terms and latest updates, visit: https://github.com/BurgessTG/ripVID
 
-Copyright (c) 2024 ripVID. All rights reserved.
-Licensed under the Apache License, Version 2.0
+ripVID 2025 - Released under Apache License 2.0
