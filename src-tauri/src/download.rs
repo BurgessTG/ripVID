@@ -490,17 +490,25 @@ pub async fn download_content(
                     let line = String::from_utf8_lossy(&line_data).to_string();
                     debug!("[stdout] {}", line);
 
-                    // Detect merger/processing phase
+                    // Detect processing phase (video merging or audio extraction)
                     if line.contains("[Merger]")
                         || line.contains("Merging formats")
                         || line.contains("[ffmpeg]")
+                        || line.contains("[ExtractAudio]")
+                        || line.contains("[FixupM4a]")
+                        || line.contains("Post-process")
                     {
-                        info!("Video processing phase detected");
+                        info!("Processing phase detected: {}", line.trim());
+                        let message = if line.contains("[ExtractAudio]") || line.contains("audio") {
+                            "Converting to MP3..."
+                        } else {
+                            "Processing video..."
+                        };
                         window_clone
                             .emit(
                                 "download-processing",
                                 serde_json::json!({
-                                    "message": "Processing video...",
+                                    "message": message,
                                     "id": download_id_clone
                                 }),
                             )
@@ -531,16 +539,44 @@ pub async fn download_content(
                         info!("Removed download handle: {}", download_id_clone);
                     }
 
+                    // Check if output file exists - yt-dlp may return non-zero even when file downloaded successfully
+                    // This handles cases where post-processing has warnings but download succeeded
+                    // Also find the actual file path (may have different extension than requested)
+                    let output_path = std::path::Path::new(&output_path_clone);
+                    let actual_file_path: Option<String> = if output_path.exists() {
+                        Some(output_path_clone.clone())
+                    } else {
+                        // For audio downloads, yt-dlp might name the file differently
+                        // Check for common variations: .mp3, .m4a, .webm, .opus, etc.
+                        let base = output_path.with_extension("");
+                        let base_str = base.to_string_lossy();
+                        let extensions = ["mp3", "m4a", "webm", "opus", "mp4", "mkv", "aac", "ogg", "wav"];
+                        extensions.iter().find_map(|ext| {
+                            let variant = format!("{}.{}", base_str, ext);
+                            if std::path::Path::new(&variant).exists() {
+                                info!("Found actual file at: {}", variant);
+                                Some(variant)
+                            } else {
+                                None
+                            }
+                        })
+                    };
+
                     if let Some(code) = payload.code {
-                        if code == 0 {
-                            info!("Download completed successfully: {}", download_id_clone);
+                        // SUCCESS: Either exit code 0 OR file exists (download succeeded despite warnings)
+                        if code == 0 || actual_file_path.is_some() {
+                            let final_path = actual_file_path.unwrap_or_else(|| output_path_clone.clone());
+                            if code != 0 {
+                                warn!("Download had non-zero exit code ({}) but file exists at {} - treating as success", code, final_path);
+                            }
+                            info!("Download completed successfully: {} -> {}", download_id_clone, final_path);
                             window_clone3
                                 .emit(
                                     "download-complete",
                                     serde_json::json!({
                                         "success": true,
                                         "id": download_id_clone,
-                                        "path": output_path_clone
+                                        "path": final_path
                                     }),
                                 )
                                 .ok();

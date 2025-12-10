@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { homeDir, join } from "@tauri-apps/api/path";
-import { open } from "@tauri-apps/plugin-shell";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
     Save,
@@ -71,6 +70,9 @@ function App() {
         null,
     );
     const [showSettings, setShowSettings] = useState(false);
+    const [processingMessage, setProcessingMessage] = useState<string>("Processing...");
+    const [processingStartTime, setProcessingStartTime] = useState<number | null>(null);
+    const [processingElapsed, setProcessingElapsed] = useState<number>(0);
     const inputRef = useRef<HTMLInputElement>(null);
     const archivePanelRef = useRef<HTMLDivElement>(null);
     const settingsPanelRef = useRef<HTMLDivElement>(null);
@@ -111,14 +113,18 @@ function App() {
             console.log("Status message:", event.payload);
         });
 
-        // Listen for download processing (ffmpeg merge)
+        // Listen for download processing (ffmpeg merge or audio extraction)
         const processingUnsubscribe = listen<{
             message: string;
             id: string;
         }>("download-processing", (event) => {
             console.log("Processing:", event.payload);
             setStatus("processing");
-            setProgress(null); // Clear percentage since we're in merge phase
+            setProgress(null); // Clear percentage since we're in processing phase
+            // Store the message for display
+            setProcessingMessage(event.payload.message);
+            // Start the processing timer
+            setProcessingStartTime(Date.now());
         });
 
         // Listen for download completion
@@ -292,6 +298,8 @@ function App() {
                 setStatus("idle");
                 setProgress(null);
                 setUrl("");
+                setProcessingStartTime(null);
+                setProcessingElapsed(0);
                 if (inputRef.current) {
                     inputRef.current.focus();
                 }
@@ -299,6 +307,16 @@ function App() {
             return () => clearTimeout(timer);
         }
     }, [status]);
+
+    // Update elapsed time during processing phase
+    useEffect(() => {
+        if (status === "processing" && processingStartTime) {
+            const interval = setInterval(() => {
+                setProcessingElapsed(Math.floor((Date.now() - processingStartTime) / 1000));
+            }, 1000);
+            return () => clearInterval(interval);
+        }
+    }, [status, processingStartTime]);
 
     const detectPlatform = async (videoUrl: string) => {
         try {
@@ -427,28 +445,23 @@ function App() {
         }
     };
 
-    const openFolder = async (path: string) => {
+    const openFile = async (path: string, fileExists: boolean | undefined) => {
+        // Don't attempt to open if we know the file doesn't exist
+        if (fileExists === false) {
+            console.warn("Cannot open file - file does not exist:", path);
+            return;
+        }
+
         try {
-            // On Windows, open explorer and select the file
-            if (navigator.platform.includes("Win")) {
-                // Use Windows Explorer with /select flag to highlight the file
-                await invoke("open_file_location", { path: path });
-            } else {
-                // For other platforms, just open the containing folder
-                const folder = path.substring(0, path.lastIndexOf("/"));
-                await open(folder);
-            }
+            // Open the file directly with the system's default application
+            await invoke("open_file_directly", { path });
         } catch (error) {
-            console.error("Failed to open folder:", error);
-            // Fallback: try to open just the folder
+            console.error("Failed to open file:", error);
+            // Fallback: try to open the containing folder instead
             try {
-                const folder = path.substring(
-                    0,
-                    Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")),
-                );
-                await open(folder);
+                await invoke("open_file_location", { path });
             } catch (fallbackError) {
-                console.error("Fallback also failed:", fallbackError);
+                console.error("Fallback to folder also failed:", fallbackError);
             }
         }
     };
@@ -589,11 +602,6 @@ function App() {
         localStorage.setItem("ripvid-quality", newQuality);
     };
 
-    const handleFormatChange = (newFormat: "mp3" | "mp4") => {
-        setDownloadFormat(newFormat);
-        localStorage.setItem("ripvid-format", newFormat);
-    };
-
     const getFilteredArchive = () => {
         if (archiveTab === "all") return archive;
         if (archiveTab === "video")
@@ -609,12 +617,29 @@ function App() {
         return null;
     };
 
+    // Estimate remaining conversion time
+    // Heuristic: MP3 conversion typically takes ~15-30 seconds for a typical song
+    // Video processing is generally faster (merging streams)
+    const getEstimatedRemaining = () => {
+        const isAudioConversion = processingMessage.includes("MP3") || processingMessage.includes("audio");
+        // Estimate: audio conversion ~20s average, video merge ~10s average
+        const estimatedTotal = isAudioConversion ? 25 : 12;
+        const remaining = Math.max(0, estimatedTotal - processingElapsed);
+        return remaining;
+    };
+
     const getStatusContent = () => {
         if (status === "processing") {
+            const remaining = getEstimatedRemaining();
+            const showEstimate = remaining > 0 && processingElapsed < 60; // Don't show estimate after 60s
+
             return (
                 <div className="processing-text">
                     <RefreshCw size={14} className="processing-spinner" />
-                    <span>Processing video...</span>
+                    <span>
+                        {processingMessage}
+                        {showEstimate ? ` ~${remaining}s` : processingElapsed > 0 ? ` (${processingElapsed}s)` : ""}
+                    </span>
                 </div>
             );
         }
@@ -699,26 +724,7 @@ function App() {
                         <h3>Settings</h3>
                     </div>
                     <div className="settings-content">
-                        {/* Format Toggle */}
-                        <div className="setting-group">
-                            <label>Download Format</label>
-                            <div className="format-toggle">
-                                <button
-                                    className={`format-option ${downloadFormat === "mp4" ? "active" : ""}`}
-                                    onClick={() => handleFormatChange("mp4")}
-                                >
-                                    🎬 Video (MP4)
-                                </button>
-                                <button
-                                    className={`format-option ${downloadFormat === "mp3" ? "active" : ""}`}
-                                    onClick={() => handleFormatChange("mp3")}
-                                >
-                                    🎵 Audio (MP3)
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Video Quality - only for MP4 */}
+                        {/* Video Quality - only shown for MP4 mode */}
                         {downloadFormat === "mp4" && (
                             <div className="setting-group">
                                 <label>Video Quality</label>
@@ -740,6 +746,17 @@ function App() {
                                             {q}
                                         </button>
                                     ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* MP3 mode hint */}
+                        {downloadFormat === "mp3" && (
+                            <div className="setting-group">
+                                <label>Audio Mode</label>
+                                <div className="setting-hint">
+                                    Downloads audio as MP3 at best quality.
+                                    Use the toggle button (top-left) to switch to video mode.
                                 </div>
                             </div>
                         )}
@@ -794,25 +811,25 @@ function App() {
                     </div>
                 </div>
 
-                {/* Settings toggle - always visible */}
+                {/* Settings toggle - hidden when any panel is open */}
                 <button
-                    className={`settings-toggle ${showSettings ? "active" : ""}`}
+                    className={`settings-toggle ${showSettings || archiveOpen ? "hidden" : ""}`}
                     onClick={() => {
-                        setShowSettings(!showSettings);
-                        if (!showSettings) setArchiveOpen(false);
+                        setShowSettings(true);
+                        setArchiveOpen(false);
                     }}
-                    aria-label={showSettings ? "Close settings" : "Open settings"}
+                    aria-label="Open settings"
                 >
                     ⚙
                 </button>
-                {/* Archive toggle - always visible */}
+                {/* Archive toggle - hidden when any panel is open */}
                 <button
-                    className={`archive-toggle ${archiveOpen ? "active" : ""}`}
+                    className={`archive-toggle ${showSettings || archiveOpen ? "hidden" : ""}`}
                     onClick={() => {
-                        setArchiveOpen(!archiveOpen);
-                        if (!archiveOpen) setShowSettings(false);
+                        setArchiveOpen(true);
+                        setShowSettings(false);
                     }}
-                    aria-label={archiveOpen ? "Close archive" : "Open archive"}
+                    aria-label="Open archive"
                 >
                     <Save size={18} />
                 </button>
@@ -866,7 +883,7 @@ function App() {
                                 >
                                     <div
                                         className="archive-item-content"
-                                        onClick={() => openFolder(item.path)}
+                                        onClick={() => openFile(item.path, item.fileExists)}
                                     >
                                         {item.fileExists === false && (
                                             <span title="File not found - may have been moved or deleted">

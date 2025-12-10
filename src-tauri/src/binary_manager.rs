@@ -491,9 +491,12 @@ impl BinaryManager {
 
             // Check if this is the binary we want
             // ffmpeg archives typically have structure like: ffmpeg-6.0-amd64-static/ffmpeg
-            let is_match = path_str.ends_with(&format!("/{}", binary_name))
-                || path_str == binary_name
-                || (path_str.contains(binary_name) && !path_str.contains(".txt") && !path_str.contains(".md"));
+            // IMPORTANT: Use exact match to avoid ffprobe matching when looking for ffmpeg
+            let filename = std::path::Path::new(&path_str)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let is_match = filename == binary_name;
 
             if is_match && entry.header().entry_type().is_file() {
                 let mut buffer = Vec::new();
@@ -531,8 +534,12 @@ impl BinaryManager {
                 path.to_string_lossy().to_string()
             };
 
-            let is_match = path_str.ends_with(&format!("/{}", binary_name))
-                || path_str == binary_name;
+            // Use exact filename match to avoid mismatches
+            let filename = std::path::Path::new(&path_str)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let is_match = filename == binary_name;
 
             if is_match && entry.header().entry_type().is_file() {
                 let mut buffer = Vec::new();

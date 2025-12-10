@@ -360,6 +360,72 @@ fn file_exists(path: String) -> Result<bool, String> {
     Ok(path_buf.exists() && path_buf.is_file())
 }
 
+/// Open a file directly with the system's default application
+#[tauri::command]
+fn open_file_directly(path: String) -> Result<(), String> {
+    info!("Opening file directly: {}", path);
+
+    let path_buf = std::path::PathBuf::from(&path);
+
+    // Basic security: ensure path is absolute
+    if !path_buf.is_absolute() {
+        warn!("Rejected relative path: {}", path);
+        return Err("Invalid path: must be absolute".to_string());
+    }
+
+    // Ensure path is within home directory
+    if let Some(home) = dirs::home_dir() {
+        if !path.starts_with(home.to_string_lossy().as_ref()) {
+            warn!("Path outside home directory: {}", path);
+            return Err("Access denied: path outside allowed directories".to_string());
+        }
+    }
+
+    // Check if file exists
+    if !path_buf.exists() {
+        warn!("File not found: {}", path);
+        return Err("File not found".to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| {
+                error!("Failed to open file with xdg-open: {}", e);
+                format!("Failed to open file: {}", e)
+            })?;
+        info!("Successfully opened file with xdg-open");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| {
+                error!("Failed to open file with open: {}", e);
+                format!("Failed to open file: {}", e)
+            })?;
+        info!("Successfully opened file with open");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &path.replace("/", "\\")])
+            .spawn()
+            .map_err(|e| {
+                error!("Failed to open file: {}", e);
+                format!("Failed to open file: {}", e)
+            })?;
+        info!("Successfully opened file with Windows start");
+    }
+
+    Ok(())
+}
+
 /// Scan downloads folders and return list of actual files
 #[tauri::command]
 async fn scan_downloads_folder() -> Result<Vec<serde_json::Value>, String> {
@@ -486,6 +552,7 @@ fn main() {
             cancel_download_command,
             create_directory,
             open_file_location,
+            open_file_directly,
             recycle_file,
             file_exists,
             scan_downloads_folder
