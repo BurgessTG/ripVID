@@ -1,6 +1,6 @@
 # Terms of Service
 
-**Last Updated: September 24, 2024**
+**Last Updated: December 2025**
 
 ## 1. Acceptance of Terms
 

@@ -1,6 +1,6 @@
 # Maintainer: BurgessTG <your-email@example.com>
 pkgname=ripvid
-pkgver=2.2.8
+pkgver=2.2.9
 pkgrel=1
 pkgdesc="A beautiful, modern desktop application for downloading videos from YouTube, X/Twitter, and 1000+ sites"
 arch=('x86_64')
