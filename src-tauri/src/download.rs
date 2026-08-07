@@ -13,6 +13,14 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+/// Browsers to try for cookie extraction, in order of preference.
+/// Firefox first - it doesn't have Windows DPAPI cookie encryption issues.
+const COOKIE_BROWSERS: [&str; 3] = ["firefox", "chrome", "edge"];
+
+/// yt-dlp format selector used when no height cap applies
+const UNCAPPED_VIDEO_FORMAT: &str =
+    "bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best";
+
 /// Strip Windows extended-length path prefix (\\?\) for yt-dlp compatibility
 /// yt-dlp doesn't recognize the \\?\ prefix and treats such paths as invalid
 #[cfg(target_os = "windows")]
@@ -78,11 +86,7 @@ impl BrowserConfig {
 pub fn detect_browser() -> Option<String> {
     info!("Starting browser detection for cookie extraction...");
 
-    // Try to detect installed browsers in order of preference
-    // Firefox first - doesn't have Windows DPAPI cookie encryption issues
-    let browsers = vec!["firefox", "chrome", "edge"];
-
-    for browser in browsers {
+    for browser in COOKIE_BROWSERS {
         debug!("Checking for browser: {}", browser);
         if is_browser_installed(browser) {
             info!("✓ Detected browser for cookies: {}", browser);
@@ -102,104 +106,23 @@ pub fn detect_browser() -> Option<String> {
 fn is_browser_installed(browser: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
-
-        let found = match browser {
-            "firefox" => {
-                // Check multiple Firefox locations
-                let paths = vec![
-                    "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
-                    "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe",
-                ];
-
-                for path in &paths {
-                    debug!("  Checking path: {}", path);
-                    if std::path::Path::new(path).exists() {
-                        debug!("  ✓ Found at: {}", path);
-                        return true;
-                    }
-                }
-
-                // Try AppData location
-                if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
-                    let local_path = format!("{}\\Mozilla Firefox\\firefox.exe", appdata);
-                    debug!("  Checking AppData: {}", local_path);
-                    if std::path::Path::new(&local_path).exists() {
-                        debug!("  ✓ Found at: {}", local_path);
-                        return true;
-                    }
-                }
-
-                false
-            }
-            "chrome" => {
-                // Check multiple Chrome locations
-                let paths = vec![
-                    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-                    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-                ];
-
-                for path in &paths {
-                    debug!("  Checking path: {}", path);
-                    if std::path::Path::new(path).exists() {
-                        debug!("  ✓ Found at: {}", path);
-                        return true;
-                    }
-                }
-
-                // Try AppData location
-                if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
-                    let local_path =
-                        format!("{}\\Google\\Chrome\\Application\\chrome.exe", appdata);
-                    debug!("  Checking AppData: {}", local_path);
-                    if std::path::Path::new(&local_path).exists() {
-                        debug!("  ✓ Found at: {}", local_path);
-                        return true;
-                    }
-                }
-
-                false
-            }
-            "edge" => {
-                // Check multiple Edge locations
-                let paths = vec![
-                    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-                    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-                ];
-
-                for path in &paths {
-                    debug!("  Checking path: {}", path);
-                    if std::path::Path::new(path).exists() {
-                        debug!("  ✓ Found at: {}", path);
-                        return true;
-                    }
-                }
-
-                // Try where command as fallback
-                debug!("  Trying 'where msedge.exe' command...");
-                let where_result = Command::new("where")
-                    .arg("msedge.exe")
-                    .output()
-                    .map(|output| {
-                        let found = output.status.success();
-                        if found {
-                            let path = String::from_utf8_lossy(&output.stdout);
-                            debug!("  ✓ Found via 'where': {}", path.trim());
-                        }
-                        found
-                    })
-                    .unwrap_or(false);
-
-                if where_result {
-                    return true;
-                }
-
-                false
-            }
-            _ => false,
+        // Relative to "C:\Program Files", "C:\Program Files (x86)" and %LOCALAPPDATA%
+        let (relative_path, executable) = match browser {
+            "firefox" => ("Mozilla Firefox\\firefox.exe", None),
+            "chrome" => ("Google\\Chrome\\Application\\chrome.exe", None),
+            "edge" => (
+                "Microsoft\\Edge\\Application\\msedge.exe",
+                Some("msedge.exe"),
+            ),
+            _ => return false,
         };
 
-        found
+        if windows_install_exists(relative_path) {
+            return true;
+        }
+
+        // Fall back to a PATH lookup for browsers installed outside the standard locations
+        executable.is_some_and(windows_executable_on_path)
     }
 
     #[cfg(target_os = "macos")]
@@ -224,30 +147,74 @@ fn is_browser_installed(browser: &str) -> bool {
     }
 }
 
+/// Check the standard Windows install locations for a program-relative path
+#[cfg(target_os = "windows")]
+fn windows_install_exists(relative_path: &str) -> bool {
+    let mut roots = vec![
+        "C:\\Program Files".to_string(),
+        "C:\\Program Files (x86)".to_string(),
+    ];
+    if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
+        roots.push(appdata);
+    }
+
+    roots.iter().any(|root| {
+        let path = format!("{}\\{}", root, relative_path);
+        debug!("  Checking path: {}", path);
+        if std::path::Path::new(&path).exists() {
+            debug!("  ✓ Found at: {}", path);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Resolve an executable through the Windows `where` command
+#[cfg(target_os = "windows")]
+fn windows_executable_on_path(executable: &str) -> bool {
+    debug!("  Trying 'where {}' command...", executable);
+
+    std::process::Command::new("where")
+        .arg(executable)
+        .output()
+        .map(|output| {
+            let found = output.status.success();
+            if found {
+                debug!(
+                    "  ✓ Found via 'where': {}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
+            }
+            found
+        })
+        .unwrap_or(false)
+}
+
 /// Map quality string to yt-dlp format selector
 fn get_quality_format(quality: &str) -> String {
-    match quality.to_lowercase().as_str() {
-        "best" => {
-            "bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best".to_string()
-        }
-        "1080p" | "1080" => {
-            "bestvideo[height<=1080][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]"
-                .to_string()
-        }
-        "720p" | "720" => {
-            "bestvideo[height<=720][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]"
-                .to_string()
-        }
-        "480p" | "480" => {
-            "bestvideo[height<=480][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]"
-                .to_string()
-        }
-        "360p" | "360" => {
-            "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]".to_string()
-        }
+    let normalized = quality.to_lowercase();
+    let height = match normalized.trim_end_matches('p') {
+        "best" => None,
+        "1080" => Some(1080),
+        "720" => Some(720),
+        "480" => Some(480),
+        "360" => Some(360),
         _ => {
             warn!("Unknown quality '{}', using 'best'", quality);
-            "bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best".to_string()
+            None
+        }
+    };
+
+    match height {
+        None => UNCAPPED_VIDEO_FORMAT.to_string(),
+        Some(height) => {
+            // H.264 is not reliably published at 360p, so the codec filter is only applied above it
+            let codec_filter = if height > 360 { "[vcodec^=avc]" } else { "" };
+            format!(
+                "bestvideo[height<={}][ext=mp4]{}+bestaudio[ext=m4a]/best[ext=mp4]",
+                height, codec_filter
+            )
         }
     }
 }
@@ -393,6 +360,28 @@ fn parse_progress(line: &str) -> Option<DownloadProgress> {
     })
 }
 
+/// Emit the terminal event for a download, carrying either the saved path or an error message
+fn emit_download_complete(
+    window: &tauri::WebviewWindow,
+    download_id: &str,
+    outcome: Result<&str, &str>,
+) {
+    let payload = match outcome {
+        Ok(path) => serde_json::json!({
+            "success": true,
+            "id": download_id,
+            "path": path
+        }),
+        Err(error) => serde_json::json!({
+            "success": false,
+            "id": download_id,
+            "error": error
+        }),
+    };
+
+    window.emit("download-complete", payload).ok();
+}
+
 /// Unified download function for both video and audio
 pub async fn download_content(
     url: String,
@@ -415,36 +404,28 @@ pub async fn download_content(
     let args = build_ytdlp_args(&url, &output_path, &download_type, &browser_config, &binary_manager);
     debug!("yt-dlp args prepared (count: {})", args.len());
 
-    // Get yt-dlp path from binary manager
-    let ytdlp_path = binary_manager.get_binary_path("yt-dlp").ok();
+    // Prefer the binary downloaded at runtime, falling back to the bundled sidecar
+    let downloaded_ytdlp = binary_manager
+        .get_binary_path("yt-dlp")
+        .ok()
+        .filter(|path| path.exists());
 
     // Spawn yt-dlp process (Bun is used as JS runtime, already in system PATH)
-    let (mut rx, child) = if let Some(path) = ytdlp_path {
-        if path.exists() {
+    let (mut rx, child) = match downloaded_ytdlp {
+        Some(path) => {
             info!("Using downloaded yt-dlp from: {:?}", path);
-            app.shell()
-                .command(path)
-                .args(&args)
-                .spawn()
-                .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
-        } else {
-            info!("Using bundled yt-dlp sidecar (downloaded binary not found)");
+            app.shell().command(path).args(&args).spawn()
+        }
+        None => {
+            info!("Using bundled yt-dlp sidecar");
             app.shell()
                 .sidecar("yt-dlp")
                 .map_err(|e| DownloadError::Sidecar(e.to_string()))?
                 .args(&args)
                 .spawn()
-                .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
         }
-    } else {
-        info!("Using bundled yt-dlp sidecar");
-        app.shell()
-            .sidecar("yt-dlp")
-            .map_err(|e| DownloadError::Sidecar(e.to_string()))?
-            .args(&args)
-            .spawn()
-            .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
-    };
+    }
+    .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?;
 
     // Store download handle for potential cancellation
     {
@@ -570,16 +551,11 @@ pub async fn download_content(
                                 warn!("Download had non-zero exit code ({}) but file exists at {} - treating as success", code, final_path);
                             }
                             info!("Download completed successfully: {} -> {}", download_id_clone, final_path);
-                            window_clone3
-                                .emit(
-                                    "download-complete",
-                                    serde_json::json!({
-                                        "success": true,
-                                        "id": download_id_clone,
-                                        "path": final_path
-                                    }),
-                                )
-                                .ok();
+                            emit_download_complete(
+                                &window_clone3,
+                                &download_id_clone,
+                                Ok(&final_path),
+                            );
                         } else {
                             // Log full stderr for debugging
                             error!(
@@ -604,32 +580,22 @@ pub async fn download_content(
                             };
 
                             error!("Download failed: {} - {}", download_id_clone, error_msg);
-                            window_clone3
-                                .emit(
-                                    "download-complete",
-                                    serde_json::json!({
-                                        "success": false,
-                                        "id": download_id_clone,
-                                        "error": error_msg
-                                    }),
-                                )
-                                .ok();
+                            emit_download_complete(
+                                &window_clone3,
+                                &download_id_clone,
+                                Err(&error_msg),
+                            );
                         }
                     } else {
                         error!(
                             "Download terminated without exit code: {}",
                             download_id_clone
                         );
-                        window_clone3
-                            .emit(
-                                "download-complete",
-                                serde_json::json!({
-                                    "success": false,
-                                    "id": download_id_clone,
-                                    "error": "Process terminated without exit code"
-                                }),
-                            )
-                            .ok();
+                        emit_download_complete(
+                            &window_clone3,
+                            &download_id_clone,
+                            Err("Process terminated without exit code"),
+                        );
                     }
                 }
                 _ => {}
@@ -679,12 +645,7 @@ pub async fn download_content_with_smart_retry(
         Err(e) => {
             // Check if error is authentication-related
             let error_str = e.to_string();
-            if error_str.contains("Authentication required")
-                || error_str.contains("Sign in")
-                || error_str.contains("Private video")
-                || error_str.contains("login required")
-                || error_str.contains("members-only")
-            {
+            if error_str.contains("Authentication required") || is_auth_error(&error_str) {
                 warn!("🔐 Authentication required, retrying with browser cookies...");
             } else {
                 // Not an auth error, fail immediately
@@ -695,9 +656,7 @@ pub async fn download_content_with_smart_retry(
     }
 
     // Attempt 2-4: Try with cookies from different browsers
-    let browsers_to_try = vec!["firefox", "chrome", "edge"];
-
-    for (index, browser_name) in browsers_to_try.iter().enumerate() {
+    for (index, browser_name) in COOKIE_BROWSERS.iter().enumerate() {
         info!(
             "📥 Attempt {}: Trying with {} cookies...",
             index + 2,

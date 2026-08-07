@@ -8,6 +8,8 @@ export interface DownloadProgress {
   eta: string
 }
 
+export type DownloadFormat = 'mp3' | 'mp4'
+
 export interface ArchiveItem {
   id: string
   title: string
@@ -15,10 +17,32 @@ export interface ArchiveItem {
   platform: string
   date: string
   path: string
-  format: 'mp3' | 'mp4'
+  format: DownloadFormat
+  /** Whether the file was still on disk the last time it was checked */
+  fileExists?: boolean
 }
 
-export type DownloadStatus = 'idle' | 'downloading' | 'success' | 'error'
+export interface DownloadStarted {
+  id: string
+  path: string
+}
+
+/** A file discovered by the `scan_downloads_folder` command */
+export interface ScannedFile {
+  path: string
+  filename: string
+  format: DownloadFormat
+  size: number
+  modified?: number
+}
+
+export type DownloadStatus =
+  | 'idle'
+  | 'downloading'
+  | 'processing'
+  | 'success'
+  | 'error'
+  | 'cancelled'
 
 export type VideoQuality = 'best' | '2160p' | '1440p' | '1080p' | '720p' | '480p' | '360p'
 

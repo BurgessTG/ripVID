@@ -2,6 +2,7 @@
 // Provides comprehensive input validation to prevent injection attacks
 
 use std::path::{Path, PathBuf};
+use tracing::warn;
 use url::Url;
 
 /// Validates a URL to prevent command injection and ensure safe URL schemes
@@ -244,6 +245,32 @@ pub fn validate_path(path_str: &str, allow_nonexistent: bool) -> Result<PathBuf,
 /// * `Err(String)` - Error message if validation fails
 pub fn validate_output_path(path_str: &str) -> Result<PathBuf, String> {
     validate_path(path_str, true)
+}
+
+/// Lightweight check for paths handed to the OS file/folder handlers
+///
+/// Unlike [`validate_path`] this does not require the path to exist, so callers
+/// can decide themselves how to handle a missing file.
+///
+/// # Returns
+/// * `Ok(PathBuf)` - The path if it is absolute and inside the user's home directory
+/// * `Err(String)` - Error message if the path is relative or outside the home directory
+pub fn ensure_user_owned_path(path_str: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path_str);
+
+    if !path.is_absolute() {
+        warn!("Rejected relative path: {}", path_str);
+        return Err("Invalid path: must be absolute".to_string());
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        if !path_str.starts_with(home.to_string_lossy().as_ref()) {
+            warn!("Path outside home directory: {}", path_str);
+            return Err("Access denied: path outside allowed directories".to_string());
+        }
+    }
+
+    Ok(path)
 }
 
 #[cfg(test)]
