@@ -261,7 +261,6 @@ fn build_ytdlp_args(
     binary_manager: &BinaryManager,
 ) -> Vec<String> {
     let mut args = vec![
-        url.to_string(),
         "--no-playlist".to_string(),
         // Use Bun JS runtime for YouTube extraction (already installed for build system)
         "--js-runtimes".to_string(),
@@ -354,6 +353,10 @@ fn build_ytdlp_args(
     args.push(output_path.to_string());
     args.push("--progress".to_string());
     args.push("--newline".to_string());
+
+    // Terminate option parsing so a URL can never be interpreted as a yt-dlp flag
+    args.push("--".to_string());
+    args.push(url.to_string());
 
     args
 }
