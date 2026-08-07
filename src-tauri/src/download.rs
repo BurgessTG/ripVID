@@ -5,7 +5,7 @@ use crate::errors::{
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
@@ -358,13 +358,33 @@ fn build_ytdlp_args(
     args
 }
 
+/// Emit an event to the frontend, logging instead of discarding emit failures
+fn emit_event<S: Serialize + Clone>(window: &tauri::WebviewWindow, event: &str, payload: S) {
+    if let Err(e) = window.emit(event, payload) {
+        error!("Failed to emit '{}' event to frontend: {}", event, e);
+    }
+}
+
+/// Regexes used to parse yt-dlp progress lines, compiled once
+fn progress_regexes() -> &'static (Regex, Regex, Regex) {
+    static REGEXES: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
+    REGEXES.get_or_init(|| {
+        (
+            Regex::new(r"(\d+(?:\.\d+)?)%").expect("percent regex is valid"),
+            Regex::new(r"at\s+(\S+)").expect("speed regex is valid"),
+            Regex::new(r"ETA\s+(\S+)").expect("eta regex is valid"),
+        )
+    })
+}
+
 /// Parse progress information from yt-dlp output
 fn parse_progress(line: &str) -> Option<DownloadProgress> {
     if !line.contains("[download]") || !line.contains("%") {
         return None;
     }
 
-    let percent_regex = Regex::new(r"(\d+(?:\.\d+)?)%").ok()?;
+    let (percent_regex, speed_regex, eta_regex) = progress_regexes();
+
     let percent = percent_regex
         .captures(line)?
         .get(1)?
@@ -372,14 +392,12 @@ fn parse_progress(line: &str) -> Option<DownloadProgress> {
         .parse::<f32>()
         .ok()?;
 
-    let speed_regex = Regex::new(r"at\s+(\S+)").ok()?;
     let speed = speed_regex
         .captures(line)
         .and_then(|cap| cap.get(1))
         .map(|m| m.as_str().to_string())
         .unwrap_or_else(|| "---".to_string());
 
-    let eta_regex = Regex::new(r"ETA\s+(\S+)").ok()?;
     let eta = eta_regex
         .captures(line)
         .and_then(|cap| cap.get(1))
@@ -462,15 +480,14 @@ pub async fn download_content(
     }
 
     // Emit download started event
-    window
-        .emit(
-            "download-started",
-            serde_json::json!({
-                "id": download_id,
-                "path": output_path
-            }),
-        )
-        .ok();
+    emit_event(
+        &window,
+        "download-started",
+        serde_json::json!({
+            "id": download_id,
+            "path": output_path
+        }),
+    );
 
     // Clone variables for async task
     let window_clone = window.clone();
@@ -483,6 +500,7 @@ pub async fn download_content(
     // Spawn async task to handle command events
     tauri::async_runtime::spawn(async move {
         let mut stderr_buffer = String::new();
+        let mut terminated = false;
 
         while let Some(event) = rx.recv().await {
             match event {
@@ -504,20 +522,19 @@ pub async fn download_content(
                         } else {
                             "Processing video..."
                         };
-                        window_clone
-                            .emit(
-                                "download-processing",
-                                serde_json::json!({
-                                    "message": message,
-                                    "id": download_id_clone
-                                }),
-                            )
-                            .ok();
+                        emit_event(
+                            &window_clone,
+                            "download-processing",
+                            serde_json::json!({
+                                "message": message,
+                                "id": download_id_clone
+                            }),
+                        );
                     }
 
                     // Parse and emit progress
                     if let Some(progress) = parse_progress(&line) {
-                        window_clone.emit("download-progress", &progress).ok();
+                        emit_event(&window_clone, "download-progress", progress);
                     }
                 }
                 CommandEvent::Stderr(line_data) => {
@@ -528,10 +545,12 @@ pub async fn download_content(
 
                     // Emit status messages for important events
                     if line.contains("Sleeping") || line.contains("rate limit") {
-                        window_clone2.emit("download-status", &line).ok();
+                        emit_event(&window_clone2, "download-status", line.clone());
                     }
                 }
                 CommandEvent::Terminated(payload) => {
+                    terminated = true;
+
                     // Remove from active downloads
                     {
                         let mut downloads = active_downloads_clone.lock().await;
@@ -570,16 +589,15 @@ pub async fn download_content(
                                 warn!("Download had non-zero exit code ({}) but file exists at {} - treating as success", code, final_path);
                             }
                             info!("Download completed successfully: {} -> {}", download_id_clone, final_path);
-                            window_clone3
-                                .emit(
-                                    "download-complete",
-                                    serde_json::json!({
-                                        "success": true,
-                                        "id": download_id_clone,
-                                        "path": final_path
-                                    }),
-                                )
-                                .ok();
+                            emit_event(
+                                &window_clone3,
+                                "download-complete",
+                                serde_json::json!({
+                                    "success": true,
+                                    "id": download_id_clone,
+                                    "path": final_path
+                                }),
+                            );
                         } else {
                             // Log full stderr for debugging
                             error!(
@@ -604,36 +622,58 @@ pub async fn download_content(
                             };
 
                             error!("Download failed: {} - {}", download_id_clone, error_msg);
-                            window_clone3
-                                .emit(
-                                    "download-complete",
-                                    serde_json::json!({
-                                        "success": false,
-                                        "id": download_id_clone,
-                                        "error": error_msg
-                                    }),
-                                )
-                                .ok();
+                            emit_event(
+                                &window_clone3,
+                                "download-complete",
+                                serde_json::json!({
+                                    "success": false,
+                                    "id": download_id_clone,
+                                    "error": error_msg
+                                }),
+                            );
                         }
                     } else {
                         error!(
                             "Download terminated without exit code: {}",
                             download_id_clone
                         );
-                        window_clone3
-                            .emit(
-                                "download-complete",
-                                serde_json::json!({
-                                    "success": false,
-                                    "id": download_id_clone,
-                                    "error": "Process terminated without exit code"
-                                }),
-                            )
-                            .ok();
+                        emit_event(
+                            &window_clone3,
+                            "download-complete",
+                            serde_json::json!({
+                                "success": false,
+                                "id": download_id_clone,
+                                "error": "Process terminated without exit code"
+                            }),
+                        );
                     }
+                }
+                CommandEvent::Error(message) => {
+                    error!("yt-dlp process error for {}: {}", download_id_clone, message);
+                    stderr_buffer.push_str(&message);
+                    stderr_buffer.push('\n');
                 }
                 _ => {}
             }
+        }
+
+        // The event stream ended without a Terminated event (e.g. the process handle was
+        // dropped or the IPC pipe broke). Without this the frontend would wait forever.
+        if !terminated {
+            error!(
+                "yt-dlp event stream ended without termination event: {}",
+                download_id_clone
+            );
+            active_downloads_clone.lock().await.remove(&download_id_clone);
+            emit_event(
+                &window_clone3,
+                "download-complete",
+                serde_json::json!({
+                    "success": false,
+                    "id": download_id_clone,
+                    "error": "Download process ended unexpectedly"
+                }),
+            );
         }
     });
 
@@ -696,6 +736,7 @@ pub async fn download_content_with_smart_retry(
 
     // Attempt 2-4: Try with cookies from different browsers
     let browsers_to_try = vec!["firefox", "chrome", "edge"];
+    let mut attempt_errors: Vec<String> = Vec::new();
 
     for (index, browser_name) in browsers_to_try.iter().enumerate() {
         info!(
@@ -738,22 +779,24 @@ pub async fn download_content_with_smart_retry(
                         "⚠️  {} cookie decryption failed (DPAPI issue), trying next browser...",
                         browser_name
                     );
-                    continue;
                 } else {
                     // Different error, might be the actual problem
                     error!("❌ Download failed with {}: {}", browser_name, e);
-                    // Try next browser anyway
-                    continue;
                 }
+                attempt_errors.push(format!("{}: {}", browser_name, error_str));
+                // Try next browser anyway
+                continue;
             }
         }
     }
 
-    // All attempts failed
-    error!("❌ All download attempts failed");
-    Err(DownloadError::Authentication(
-        "Unable to download this video. It may require login. Please verify the video is accessible in your browser, or install Firefox and log into the website there for automatic authentication.".to_string()
-    ))
+    // All attempts failed - keep the underlying errors instead of reporting a generic one
+    error!("❌ All download attempts failed: {:?}", attempt_errors);
+    let mut message = "Unable to download this video. It may require login. Please verify the video is accessible in your browser, or install Firefox and log into the website there for automatic authentication.".to_string();
+    if !attempt_errors.is_empty() {
+        message.push_str(&format!(" (attempts: {})", attempt_errors.join("; ")));
+    }
+    Err(DownloadError::Authentication(message))
 }
 
 /// Cancel an active download
@@ -781,20 +824,21 @@ pub async fn cancel_download(
         // Clean up temporary files (yt-dlp creates .part files)
         let part_file = format!("{}.part", handle.output_path);
         if std::path::Path::new(&part_file).exists() {
-            std::fs::remove_file(&part_file).ok();
-            info!("Cleaned up temp file: {}", part_file);
+            match std::fs::remove_file(&part_file) {
+                Ok(()) => info!("Cleaned up temp file: {}", part_file),
+                Err(e) => warn!("Failed to clean up temp file {}: {}", part_file, e),
+            }
         }
 
         // Emit cancellation event
-        window
-            .emit(
-                "download-cancelled",
-                serde_json::json!({
-                    "id": download_id,
-                    "path": handle.output_path
-                }),
-            )
-            .ok();
+        emit_event(
+            &window,
+            "download-cancelled",
+            serde_json::json!({
+                "id": download_id,
+                "path": handle.output_path
+            }),
+        );
 
         Ok(())
     } else {

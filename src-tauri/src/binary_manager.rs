@@ -48,7 +48,13 @@ impl BinaryManager {
         let data_dir = app_handle
             .path()
             .app_data_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
+            .unwrap_or_else(|e| {
+                error!(
+                    "Could not resolve app data directory ({}), falling back to current directory",
+                    e
+                );
+                PathBuf::from(".")
+            })
             .join("binaries");
 
         Self {
@@ -82,7 +88,7 @@ impl BinaryManager {
         // If any are missing, download them (first run)
         if !missing.is_empty() {
             info!("First run detected. Downloading: {:?}", missing);
-            self.emit_progress("setup", 0.0, "Downloading required tools...")?;
+            self.emit_progress("setup", 0.0, "Downloading required tools...");
 
             // Download in parallel for speed
             let manager1 = self.clone_for_background();
@@ -118,7 +124,7 @@ impl BinaryManager {
                 return Err(format!("Failed to download: {}", errors.join(", ")));
             }
 
-            self.emit_progress("setup", 100.0, "All tools ready!")?;
+            self.emit_progress("setup", 100.0, "All tools ready!");
         }
 
         // Check for updates in background (non-blocking)
@@ -161,7 +167,9 @@ impl BinaryManager {
         }
 
         // Save last check time
-        self.save_last_check()?;
+        if let Err(e) = self.save_last_check() {
+            warn!("Failed to record last update check time: {}", e);
+        }
 
         Ok(())
     }
@@ -173,27 +181,32 @@ impl BinaryManager {
             return Ok(true);
         }
 
-        let content = fs::read_to_string(&version_file).ok();
-        if let Some(content) = content {
-            if let Ok(last_check) = content.parse::<u64>() {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-
-                // Check once per day (86400 seconds)
-                return Ok(now - last_check > 86400);
+        match fs::read_to_string(&version_file) {
+            Ok(content) => match content.trim().parse::<u64>() {
+                Ok(last_check) => {
+                    // Check once per day (86400 seconds)
+                    Ok(unix_now().saturating_sub(last_check) > 86400)
+                }
+                Err(e) => {
+                    warn!(
+                        "Malformed last-check file {:?} ({}), checking for updates anyway",
+                        version_file, e
+                    );
+                    Ok(true)
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "Failed to read last-check file {:?} ({}), checking for updates anyway",
+                    version_file, e
+                );
+                Ok(true)
             }
         }
-
-        Ok(true)
     }
 
     fn save_last_check(&self) -> Result<(), String> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_now();
 
         let version_file = self.data_dir.join("last-check.json");
         fs::write(version_file, now.to_string()).map_err(|e| e.to_string())?;
@@ -225,14 +238,26 @@ impl BinaryManager {
             return None;
         }
 
-        let content = fs::read_to_string(&info_file).ok()?;
-        let info: BinaryInfo = serde_json::from_str(&content).ok()?;
-        Some(info.version)
+        let content = match fs::read_to_string(&info_file) {
+            Ok(content) => content,
+            Err(e) => {
+                warn!("Failed to read {:?}: {}", info_file, e);
+                return None;
+            }
+        };
+
+        match serde_json::from_str::<BinaryInfo>(&content) {
+            Ok(info) => Some(info.version),
+            Err(e) => {
+                warn!("Failed to parse {:?}: {}", info_file, e);
+                None
+            }
+        }
     }
 
     /// Download yt-dlp
     async fn download_ytdlp(&self) -> Result<(), String> {
-        self.emit_progress("yt-dlp", 0.0, "Downloading yt-dlp...")?;
+        self.emit_progress("yt-dlp", 0.0, "Downloading yt-dlp...");
 
         let client = reqwest::Client::new();
 
@@ -257,7 +282,7 @@ impl BinaryManager {
             .find(|a| a.name == asset_name)
             .ok_or_else(|| format!("No asset found for {}", asset_name))?;
 
-        self.emit_progress("yt-dlp", 25.0, "Downloading binary...")?;
+        self.emit_progress("yt-dlp", 25.0, "Downloading binary...");
 
         // Download binary
         let response = client
@@ -271,7 +296,7 @@ impl BinaryManager {
             .await
             .map_err(|e| format!("Failed to read bytes: {}", e))?;
 
-        self.emit_progress("yt-dlp", 75.0, "Verifying checksum...")?;
+        self.emit_progress("yt-dlp", 75.0, "Verifying checksum...");
 
         // Verify checksum
         let checksums_url = format!(
@@ -308,7 +333,7 @@ impl BinaryManager {
         // Save version info
         self.save_binary_info("yt-dlp", &release.tag_name, &path)?;
 
-        self.emit_progress("yt-dlp", 100.0, "Ready!")?;
+        self.emit_progress("yt-dlp", 100.0, "Ready!");
 
         info!("yt-dlp {} installed successfully", release.tag_name);
 
@@ -317,7 +342,7 @@ impl BinaryManager {
 
     /// Download ffmpeg with fallback sources
     async fn download_ffmpeg(&self) -> Result<(), String> {
-        self.emit_progress("ffmpeg", 0.0, "Downloading ffmpeg...")?;
+        self.emit_progress("ffmpeg", 0.0, "Downloading ffmpeg...");
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300)) // 5 min timeout for large files
@@ -326,18 +351,20 @@ impl BinaryManager {
 
         // Try multiple sources for reliability
         let sources = self.get_ffmpeg_sources();
+        let mut source_errors = Vec::new();
 
         for (i, source) in sources.iter().enumerate() {
             info!("Trying ffmpeg source {}/{}: {}", i + 1, sources.len(), source.name);
 
             match self.download_from_source(&client, "ffmpeg", source).await {
                 Ok(()) => {
-                    self.emit_progress("ffmpeg", 100.0, "Ready!")?;
+                    self.emit_progress("ffmpeg", 100.0, "Ready!");
                     info!("ffmpeg downloaded successfully from {}", source.name);
                     return Ok(());
                 }
                 Err(e) => {
                     warn!("Failed to download from {}: {}", source.name, e);
+                    source_errors.push(format!("{}: {}", source.name, e));
                     if i < sources.len() - 1 {
                         info!("Trying next source...");
                     }
@@ -345,12 +372,15 @@ impl BinaryManager {
             }
         }
 
-        Err("All ffmpeg sources failed".to_string())
+        Err(format!(
+            "All ffmpeg sources failed ({})",
+            source_errors.join("; ")
+        ))
     }
 
     /// Download ffprobe with fallback sources
     async fn download_ffprobe(&self) -> Result<(), String> {
-        self.emit_progress("ffprobe", 0.0, "Downloading ffprobe...")?;
+        self.emit_progress("ffprobe", 0.0, "Downloading ffprobe...");
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
@@ -358,18 +388,20 @@ impl BinaryManager {
             .map_err(|e| e.to_string())?;
 
         let sources = self.get_ffprobe_sources();
+        let mut source_errors = Vec::new();
 
         for (i, source) in sources.iter().enumerate() {
             info!("Trying ffprobe source {}/{}: {}", i + 1, sources.len(), source.name);
 
             match self.download_from_source(&client, "ffprobe", source).await {
                 Ok(()) => {
-                    self.emit_progress("ffprobe", 100.0, "Ready!")?;
+                    self.emit_progress("ffprobe", 100.0, "Ready!");
                     info!("ffprobe downloaded successfully from {}", source.name);
                     return Ok(());
                 }
                 Err(e) => {
                     warn!("Failed to download from {}: {}", source.name, e);
+                    source_errors.push(format!("{}: {}", source.name, e));
                     if i < sources.len() - 1 {
                         info!("Trying next source...");
                     }
@@ -377,7 +409,10 @@ impl BinaryManager {
             }
         }
 
-        Err("All ffprobe sources failed".to_string())
+        Err(format!(
+            "All ffprobe sources failed ({})",
+            source_errors.join("; ")
+        ))
     }
     async fn download_from_source(
         &self,
@@ -385,7 +420,7 @@ impl BinaryManager {
         binary_name: &str,
         source: &DownloadSource,
     ) -> Result<(), String> {
-        self.emit_progress(binary_name, 25.0, &format!("Downloading from {}...", source.name))?;
+        self.emit_progress(binary_name, 25.0, &format!("Downloading from {}...", source.name));
 
         let response = client
             .get(&source.url)
@@ -399,7 +434,7 @@ impl BinaryManager {
 
         let bytes = response.bytes().await.map_err(|e| e.to_string())?;
 
-        self.emit_progress(binary_name, 75.0, "Extracting binary...")?;
+        self.emit_progress(binary_name, 75.0, "Extracting binary...");
 
         // Handle archive extraction based on type
         let final_bytes = match source.archive_type {
@@ -727,15 +762,34 @@ impl BinaryManager {
         let path = self.get_binary_path("yt-dlp")?;
         let backup_path = self.data_dir.join(if cfg!(windows) { "yt-dlp.exe.backup" } else { "yt-dlp.backup" });
 
+        let mut have_backup = false;
         if path.exists() {
-            fs::copy(&path, &backup_path).ok();
+            match fs::copy(&path, &backup_path) {
+                Ok(_) => have_backup = true,
+                Err(e) => {
+                    // Without a backup an interrupted write would leave no working binary
+                    return Err(format!(
+                        "Failed to back up existing yt-dlp before update: {}",
+                        e
+                    ));
+                }
+            }
         }
 
         // Save new binary
         if let Err(e) = fs::write(&path, &bytes) {
             // Rollback on failure
-            if backup_path.exists() {
-                fs::copy(&backup_path, &path).ok();
+            if have_backup {
+                if let Err(rollback_err) = fs::copy(&backup_path, &path) {
+                    error!(
+                        "Failed to restore yt-dlp backup after failed update: {}",
+                        rollback_err
+                    );
+                    return Err(format!(
+                        "Failed to save updated binary ({}) and failed to restore backup ({})",
+                        e, rollback_err
+                    ));
+                }
             }
             return Err(format!("Failed to save updated binary: {}", e));
         }
@@ -751,7 +805,9 @@ impl BinaryManager {
 
         // Clean up backup
         if backup_path.exists() {
-            fs::remove_file(&backup_path).ok();
+            if let Err(e) = fs::remove_file(&backup_path) {
+                warn!("Failed to remove yt-dlp backup {:?}: {}", backup_path, e);
+            }
         }
 
         // Save version info
@@ -776,8 +832,8 @@ impl BinaryManager {
         }
 
         // Check file age - update if older than 30 days
-        if let Ok(metadata) = fs::metadata(&ffmpeg_path) {
-            if let Ok(modified) = metadata.modified() {
+        match fs::metadata(&ffmpeg_path).and_then(|metadata| metadata.modified()) {
+            Ok(modified) => {
                 let age = SystemTime::now()
                     .duration_since(modified)
                     .unwrap_or_default();
@@ -789,6 +845,10 @@ impl BinaryManager {
                     return Ok(true);
                 }
             }
+            Err(e) => warn!(
+                "Could not determine age of {:?} ({}), skipping ffmpeg update",
+                ffmpeg_path, e
+            ),
         }
 
         info!("ffmpeg is up to date");
@@ -799,10 +859,7 @@ impl BinaryManager {
         let info = BinaryInfo {
             name: name.to_string(),
             version: version.to_string(),
-            last_check: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            last_check: unix_now(),
             path: path.to_string_lossy().to_string(),
         };
 
@@ -861,23 +918,37 @@ impl BinaryManager {
         Err(format!("Checksum not found for {}", asset_name))
     }
 
-    fn emit_progress(&self, binary: &str, progress: f64, status: &str) -> Result<(), String> {
+    /// Emit setup progress to the frontend.
+    /// Failing to notify the UI must not abort the download itself, so failures are logged.
+    fn emit_progress(&self, binary: &str, progress: f64, status: &str) {
         let event = DownloadProgress {
             binary: binary.to_string(),
             progress,
             status: status.to_string(),
         };
 
-        self.app_handle
-            .emit("binary-download-progress", event)
-            .map_err(|e| e.to_string())?;
-
-        Ok(())
+        if let Err(e) = self.app_handle.emit("binary-download-progress", event) {
+            warn!(
+                "Failed to emit binary download progress for {}: {}",
+                binary, e
+            );
+        }
     }
 
     pub fn clone_for_background(&self) -> Self {
         self.clone()
     }
+}
+
+/// Seconds since the UNIX epoch, saturating to 0 if the system clock predates it
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_else(|e| {
+            warn!("System clock is before the UNIX epoch ({}), using 0", e);
+            0
+        })
 }
 
 /// Type of archive for extraction
