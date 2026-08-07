@@ -16,9 +16,12 @@ mod binary_manager;
 mod download;
 mod errors;
 mod logging;
+mod platform;
 mod validation;
 
 use binary_manager::BinaryManager;
+use platform::open_with_os;
+use validation::ensure_user_owned_path;
 use download::{
     cancel_download, download_content_with_smart_retry, DownloadHandle, DownloadType,
 };
@@ -166,23 +169,7 @@ fn create_directory(path: String) -> Result<(), String> {
 fn open_file_location(path: String) -> Result<(), String> {
     info!("Opening file location: {}", path);
 
-    // Basic security: ensure path is within user's home directory
-    // But be more lenient to handle edge cases
-    let path_buf = std::path::PathBuf::from(&path);
-
-    // Check if path is absolute (basic security)
-    if !path_buf.is_absolute() {
-        warn!("Rejected relative path: {}", path);
-        return Err("Invalid path: must be absolute".to_string());
-    }
-
-    // Ensure path is within safe directories
-    if let Some(home) = dirs::home_dir() {
-        if !path.starts_with(home.to_string_lossy().as_ref()) {
-            warn!("Path outside home directory: {}", path);
-            return Err("Access denied: path outside allowed directories".to_string());
-        }
-    }
+    let path_buf = ensure_user_owned_path(&path)?;
 
     // Try to open the exact file if it exists
     if path_buf.exists() && path_buf.is_file() {
@@ -307,40 +294,7 @@ fn open_folder_fallback(path: String) -> Result<(), String> {
 
     info!("Opening folder: {}", folder_path);
 
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("explorer")
-            .arg(&folder_path.replace("/", "\\"))
-            .spawn()
-            .map_err(|e| {
-                error!("Failed to open folder: {}", e);
-                format!("Failed to open folder: {}", e)
-            })?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| {
-                error!("Failed to open folder: {}", e);
-                format!("Failed to open folder: {}", e)
-            })?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open")
-            .arg(&folder_path)
-            .spawn()
-            .map_err(|e| {
-                error!("Failed to open folder: {}", e);
-                format!("Failed to open folder: {}", e)
-            })?;
-    }
-
-    Ok(())
+    open_with_os(&folder_path)
 }
 
 /// Move a file to the recycle bin
@@ -365,137 +319,63 @@ fn file_exists(path: String) -> Result<bool, String> {
 fn open_file_directly(path: String) -> Result<(), String> {
     info!("Opening file directly: {}", path);
 
-    let path_buf = std::path::PathBuf::from(&path);
+    let path_buf = ensure_user_owned_path(&path)?;
 
-    // Basic security: ensure path is absolute
-    if !path_buf.is_absolute() {
-        warn!("Rejected relative path: {}", path);
-        return Err("Invalid path: must be absolute".to_string());
-    }
-
-    // Ensure path is within home directory
-    if let Some(home) = dirs::home_dir() {
-        if !path.starts_with(home.to_string_lossy().as_ref()) {
-            warn!("Path outside home directory: {}", path);
-            return Err("Access denied: path outside allowed directories".to_string());
-        }
-    }
-
-    // Check if file exists
     if !path_buf.exists() {
         warn!("File not found: {}", path);
         return Err("File not found".to_string());
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open")
-            .arg(&path)
-            .spawn()
-            .map_err(|e| {
-                error!("Failed to open file with xdg-open: {}", e);
-                format!("Failed to open file: {}", e)
-            })?;
-        info!("Successfully opened file with xdg-open");
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(&path)
-            .spawn()
-            .map_err(|e| {
-                error!("Failed to open file with open: {}", e);
-                format!("Failed to open file: {}", e)
-            })?;
-        info!("Successfully opened file with open");
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/C", "start", "", &path.replace("/", "\\")])
-            .spawn()
-            .map_err(|e| {
-                error!("Failed to open file: {}", e);
-                format!("Failed to open file: {}", e)
-            })?;
-        info!("Successfully opened file with Windows start");
-    }
-
-    Ok(())
+    open_with_os(&path)
 }
 
 /// Scan downloads folders and return list of actual files
 #[tauri::command]
 async fn scan_downloads_folder() -> Result<Vec<serde_json::Value>, String> {
-    use serde_json::json;
-
     let home = dirs::home_dir().ok_or("Could not determine home directory")?;
     let ripvid_base = home.join("ripVID");
 
     let mut files = Vec::new();
 
-    // Scan MP4 folder
-    let mp4_dir = ripvid_base.join("MP4");
-    if mp4_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&mp4_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        let path = entry.path();
-                        let filename = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-
-                        files.push(json!({
-                            "path": path.to_string_lossy().to_string(),
-                            "filename": filename,
-                            "format": "mp4",
-                            "size": metadata.len(),
-                            "modified": metadata.modified()
-                                .ok()
-                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs())
-                        }));
-                    }
-                }
-            }
-        }
-    }
-
-    // Scan MP3 folder
-    let mp3_dir = ripvid_base.join("MP3");
-    if mp3_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&mp3_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        let path = entry.path();
-                        let filename = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-
-                        files.push(json!({
-                            "path": path.to_string_lossy().to_string(),
-                            "filename": filename,
-                            "format": "mp3",
-                            "size": metadata.len(),
-                            "modified": metadata.modified()
-                                .ok()
-                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs())
-                        }));
-                    }
-                }
-            }
-        }
+    // Each download format lives in its own folder, named after the format
+    for format in ["mp4", "mp3"] {
+        files.extend(scan_format_folder(
+            &ripvid_base.join(format.to_uppercase()),
+            format,
+        ));
     }
 
     info!("Scanned downloads folder, found {} files", files.len());
     Ok(files)
+}
+
+/// Describe every file directly inside a download folder
+fn scan_format_folder(dir: &std::path::Path, format: &str) -> Vec<serde_json::Value> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+
+            let path = entry.path();
+            Some(serde_json::json!({
+                "path": path.to_string_lossy().to_string(),
+                "filename": path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
+                "format": format,
+                "size": metadata.len(),
+                "modified": metadata.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+            }))
+        })
+        .collect()
 }
 
 fn main() {

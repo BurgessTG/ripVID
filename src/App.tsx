@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { homeDir, join } from "@tauri-apps/api/path";
+import { join } from "@tauri-apps/api/path";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
     Save,
@@ -16,6 +16,30 @@ import {
     AlertCircle,
     RefreshCw,
 } from "lucide-react";
+import type {
+    ArchiveItem,
+    DownloadFormat,
+    DownloadProgress,
+    DownloadStarted,
+    DownloadStatus,
+    ScannedFile,
+} from "./types";
+import {
+    ensureDownloadFolders,
+    ensureFormatFolder,
+    fileExists,
+    withFileExistence,
+} from "./lib/files";
+import {
+    acceptTerms,
+    areTermsAccepted,
+    loadArchive,
+    loadFormat,
+    loadQuality,
+    saveArchive,
+    saveFormat,
+    saveQuality,
+} from "./lib/storage";
 import TitleBar from "./components/TitleBar";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { TermsAcceptance } from "./components/TermsAcceptance";
@@ -23,44 +47,15 @@ import ShaderBackground from "./components/ShaderBackground";
 import "./components/TermsAcceptance.css";
 import "./App.css";
 
-interface DownloadProgress {
-    percent: number;
-    speed: string;
-    eta: string;
-}
-
-interface DownloadStarted {
-    id: string;
-    path: string;
-}
-
-interface ArchiveItem {
-    id: string;
-    title: string;
-    url: string;
-    platform: string;
-    date: string;
-    path: string;
-    format: "mp3" | "mp4";
-    fileExists?: boolean; // Track if file actually exists on disk
-}
-
 function App() {
     const [url, setUrl] = useState("");
     const [isDownloading, setIsDownloading] = useState(false);
     const [progress, setProgress] = useState<DownloadProgress | null>(null);
-    const [status, setStatus] = useState<
-        | "idle"
-        | "downloading"
-        | "processing"
-        | "success"
-        | "error"
-        | "cancelled"
-    >("idle");
+    const [status, setStatus] = useState<DownloadStatus>("idle");
     const [platform, setPlatform] = useState<string | null>(null);
     const [archiveOpen, setArchiveOpen] = useState(false);
     const [archive, setArchive] = useState<ArchiveItem[]>([]);
-    const [downloadFormat, setDownloadFormat] = useState<"mp3" | "mp4">("mp4");
+    const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>("mp4");
     const [archiveTab, setArchiveTab] = useState<"all" | "video" | "audio">(
         "all",
     );
@@ -79,7 +74,7 @@ function App() {
     const downloadInfoRef = useRef<{
         url: string;
         platform: string;
-        format: "mp3" | "mp4";
+        format: DownloadFormat;
     } | null>(null);
     const lastProgressUpdate = useRef<number>(0);
 
@@ -141,22 +136,9 @@ function App() {
                 event.payload.path &&
                 downloadInfoRef.current
             ) {
-                // Verify file actually exists before adding to archive
-                // Add small delay to ensure file is fully written
-                const verifyFileExists = async (retries = 3): Promise<boolean> => {
-                    for (let i = 0; i < retries; i++) {
-                        const exists = await invoke<boolean>("file_exists", {
-                            path: event.payload.path,
-                        });
-                        if (exists) return true;
-                        // Wait 500ms before retry
-                        await new Promise(r => setTimeout(r, 500));
-                    }
-                    return false;
-                };
-
                 try {
-                    const exists = await verifyFileExists();
+                    // Retry while the file is still being written to disk
+                    const exists = await fileExists(event.payload.path, 3);
 
                     if (exists) {
                         // Add to archive with fileExists flag
@@ -174,13 +156,8 @@ function App() {
                         };
 
                         setArchive(prevArchive => {
-                            const newArchive = [newItem, ...prevArchive];
-                            localStorage.setItem(
-                                "ripvid-archive",
-                                JSON.stringify(newArchive),
-                            );
                             console.log("Added to archive:", newItem);
-                            return newArchive;
+                            return saveArchive([newItem, ...prevArchive]);
                         });
                     } else {
                         console.warn(
@@ -225,9 +202,7 @@ function App() {
     useEffect(() => {
         // Initialize app and check first launch
         const initializeApp = async () => {
-            // Check if terms have been accepted
-            const termsAccepted = localStorage.getItem("ripvid-terms-accepted");
-            if (!termsAccepted) {
+            if (!areTermsAccepted()) {
                 setShowTerms(true);
             } else {
                 // Ensure folder structure exists
@@ -239,20 +214,18 @@ function App() {
             await appWindow.show();
 
             // Load archive from localStorage
-            const saved = localStorage.getItem("ripvid-archive");
-            if (saved) {
-                const loadedArchive = JSON.parse(saved);
+            const loadedArchive = loadArchive();
+            if (loadedArchive.length > 0) {
                 setArchive(loadedArchive);
                 // Verify files exist in background
                 verifyArchiveFiles(loadedArchive);
             }
-            // Load format preference
-            const savedFormat = localStorage.getItem("ripvid-format");
-            if (savedFormat === "mp3" || savedFormat === "mp4") {
+
+            const savedFormat = loadFormat();
+            if (savedFormat) {
                 setDownloadFormat(savedFormat);
             }
-            // Load quality preference
-            const savedQuality = localStorage.getItem("ripvid-quality");
+            const savedQuality = loadQuality();
             if (savedQuality) {
                 setQuality(savedQuality);
             }
@@ -344,12 +317,7 @@ function App() {
     };
 
     const getDownloadPath = async () => {
-        const home = await homeDir();
-        const formatFolder = downloadFormat.toUpperCase();
-        const ripvidDir = await join(home, "ripVID", formatFolder);
-
-        // Create directory if it doesn't exist
-        await invoke("create_directory", { path: ripvidDir });
+        const ripvidDir = await ensureFormatFolder(downloadFormat);
 
         const timestamp = new Date()
             .toISOString()
@@ -473,32 +441,17 @@ function App() {
         try {
             // Recycle the actual file
             await invoke("recycle_file", { path: item.path });
-
-            // Remove from archive
-            const newArchive = archive.filter((item) => item.id !== id);
-            setArchive(newArchive);
-            localStorage.setItem("ripvid-archive", JSON.stringify(newArchive));
         } catch (error) {
             console.error("Failed to recycle file:", error);
-            // Still remove from archive even if file recycling fails
-            const newArchive = archive.filter((item) => item.id !== id);
-            setArchive(newArchive);
-            localStorage.setItem("ripvid-archive", JSON.stringify(newArchive));
         }
+
+        // Remove from archive even if file recycling failed
+        setArchive(saveArchive(archive.filter((item) => item.id !== id)));
     };
 
     const setupFolderStructure = async () => {
         try {
-            const home = await homeDir();
-            const ripvidDir = await join(home, "ripVID");
-            const mp4Dir = await join(ripvidDir, "MP4");
-            const mp3Dir = await join(ripvidDir, "MP3");
-
-            // Create all directories
-            await invoke("create_directory", { path: ripvidDir });
-            await invoke("create_directory", { path: mp4Dir });
-            await invoke("create_directory", { path: mp3Dir });
-
+            await ensureDownloadFolders();
             console.log("Folder structure created successfully");
         } catch (error) {
             console.error("Failed to create folder structure:", error);
@@ -507,29 +460,14 @@ function App() {
 
     // Verify if files in archive actually exist
     const verifyArchiveFiles = async (archiveItems: ArchiveItem[]) => {
-        const updatedArchive = await Promise.all(
-            archiveItems.map(async (item) => {
-                try {
-                    const exists = await invoke<boolean>("file_exists", {
-                        path: item.path,
-                    });
-                    return { ...item, fileExists: exists };
-                } catch (error) {
-                    console.error("Failed to verify file:", item.path, error);
-                    return { ...item, fileExists: false };
-                }
-            }),
-        );
-
-        setArchive(updatedArchive);
-        localStorage.setItem("ripvid-archive", JSON.stringify(updatedArchive));
+        setArchive(saveArchive(await withFileExistence(archiveItems)));
     };
 
     // Refresh archive by scanning actual download folders
     const refreshArchive = async () => {
         try {
             console.log("Refreshing archive from disk...");
-            const files = await invoke<any[]>("scan_downloads_folder");
+            const files = await invoke<ScannedFile[]>("scan_downloads_folder");
 
             if (files.length === 0) {
                 console.log("No files found in downloads folder");
@@ -559,12 +497,7 @@ function App() {
             );
 
             if (newItems.length > 0) {
-                const mergedArchive = [...archive, ...newItems];
-                setArchive(mergedArchive);
-                localStorage.setItem(
-                    "ripvid-archive",
-                    JSON.stringify(mergedArchive),
-                );
+                setArchive(saveArchive([...archive, ...newItems]));
                 console.log(
                     `Added ${newItems.length} files from disk to archive`,
                 );
@@ -580,7 +513,7 @@ function App() {
     };
 
     const handleAcceptTerms = async () => {
-        localStorage.setItem("ripvid-terms-accepted", "true");
+        acceptTerms();
         setShowTerms(false);
         await setupFolderStructure();
     };
@@ -594,12 +527,12 @@ function App() {
     const toggleFormat = () => {
         const newFormat = downloadFormat === "mp4" ? "mp3" : "mp4";
         setDownloadFormat(newFormat);
-        localStorage.setItem("ripvid-format", newFormat);
+        saveFormat(newFormat);
     };
 
     const handleQualityChange = (newQuality: string) => {
         setQuality(newQuality);
-        localStorage.setItem("ripvid-quality", newQuality);
+        saveQuality(newQuality);
     };
 
     const getFilteredArchive = () => {
