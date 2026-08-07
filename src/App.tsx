@@ -34,6 +34,27 @@ interface DownloadStarted {
     path: string;
 }
 
+const ARCHIVE_STORAGE_KEY = "ripvid-archive";
+
+/** Normalise anything thrown/rejected (Tauri rejects with plain strings) into a message */
+function toErrorMessage(error: unknown): string {
+    if (typeof error === "string") return error;
+    if (error instanceof Error) return error.message;
+    return String(error);
+}
+
+/** Persist the archive, surfacing storage failures instead of throwing from a state updater */
+function persistArchive(items: ArchiveItem[]): string | null {
+    try {
+        localStorage.setItem(ARCHIVE_STORAGE_KEY, JSON.stringify(items));
+        return null;
+    } catch (error) {
+        const message = toErrorMessage(error);
+        console.error("Failed to save archive to localStorage:", error);
+        return message;
+    }
+}
+
 interface ArchiveItem {
     id: string;
     title: string;
@@ -70,6 +91,7 @@ function App() {
         null,
     );
     const [showSettings, setShowSettings] = useState(false);
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [processingMessage, setProcessingMessage] = useState<string>("Processing...");
     const [processingStartTime, setProcessingStartTime] = useState<number | null>(null);
     const [processingElapsed, setProcessingElapsed] = useState<number>(0);
@@ -136,6 +158,12 @@ function App() {
         }>("download-complete", async (event) => {
             console.log("Download complete:", event.payload);
 
+            if (!event.payload.success) {
+                setErrorMessage(
+                    event.payload.error ?? "Download failed for an unknown reason",
+                );
+            }
+
             if (
                 event.payload.success &&
                 event.payload.path &&
@@ -175,10 +203,12 @@ function App() {
 
                         setArchive(prevArchive => {
                             const newArchive = [newItem, ...prevArchive];
-                            localStorage.setItem(
-                                "ripvid-archive",
-                                JSON.stringify(newArchive),
-                            );
+                            const saveError = persistArchive(newArchive);
+                            if (saveError) {
+                                setErrorMessage(
+                                    `Download saved but archive could not be stored: ${saveError}`,
+                                );
+                            }
                             console.log("Added to archive:", newItem);
                             return newArchive;
                         });
@@ -187,9 +217,15 @@ function App() {
                             "File not found after download:",
                             event.payload.path,
                         );
+                        setErrorMessage(
+                            "Download reported success but the file could not be found on disk",
+                        );
                     }
                 } catch (error) {
                     console.error("Failed to verify file:", error);
+                    setErrorMessage(
+                        `Could not verify the downloaded file: ${toErrorMessage(error)}`,
+                    );
                 }
             }
 
@@ -212,12 +248,23 @@ function App() {
         );
 
         return () => {
-            progressUnsubscribe.then((fn) => fn());
-            startedUnsubscribe.then((fn) => fn());
-            statusUnsubscribe.then((fn) => fn());
-            processingUnsubscribe.then((fn) => fn());
-            completeUnsubscribe.then((fn) => fn());
-            cancelledUnsubscribe.then((fn) => fn());
+            for (const unsubscribe of [
+                progressUnsubscribe,
+                startedUnsubscribe,
+                statusUnsubscribe,
+                processingUnsubscribe,
+                completeUnsubscribe,
+                cancelledUnsubscribe,
+            ]) {
+                unsubscribe
+                    .then((fn) => fn())
+                    .catch((error) =>
+                        console.error(
+                            "Failed to remove event listener:",
+                            error,
+                        ),
+                    );
+            }
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []); // Empty deps - listeners should only be set up once on mount
@@ -225,26 +272,40 @@ function App() {
     useEffect(() => {
         // Initialize app and check first launch
         const initializeApp = async () => {
-            // Check if terms have been accepted
-            const termsAccepted = localStorage.getItem("ripvid-terms-accepted");
-            if (!termsAccepted) {
-                setShowTerms(true);
-            } else {
-                // Ensure folder structure exists
-                await setupFolderStructure();
+            try {
+                // Check if terms have been accepted
+                const termsAccepted = localStorage.getItem(
+                    "ripvid-terms-accepted",
+                );
+                if (!termsAccepted) {
+                    setShowTerms(true);
+                } else {
+                    // Ensure folder structure exists
+                    await setupFolderStructure();
+                }
+            } finally {
+                // Always show the window, otherwise a setup failure leaves the app invisible
+                await getCurrentWebviewWindow().show();
             }
 
-            // Show window once app is ready
-            const appWindow = getCurrentWebviewWindow();
-            await appWindow.show();
-
             // Load archive from localStorage
-            const saved = localStorage.getItem("ripvid-archive");
+            const saved = localStorage.getItem(ARCHIVE_STORAGE_KEY);
             if (saved) {
-                const loadedArchive = JSON.parse(saved);
-                setArchive(loadedArchive);
-                // Verify files exist in background
-                verifyArchiveFiles(loadedArchive);
+                try {
+                    const loadedArchive = JSON.parse(saved) as ArchiveItem[];
+                    if (!Array.isArray(loadedArchive)) {
+                        throw new Error("Stored archive is not a list");
+                    }
+                    setArchive(loadedArchive);
+                    // Verify files exist in background
+                    await verifyArchiveFiles(loadedArchive);
+                } catch (error) {
+                    console.error("Stored archive is corrupt, resetting:", error);
+                    setErrorMessage(
+                        "Saved download history was unreadable and has been reset",
+                    );
+                    localStorage.removeItem(ARCHIVE_STORAGE_KEY);
+                }
             }
             // Load format preference
             const savedFormat = localStorage.getItem("ripvid-format");
@@ -258,7 +319,12 @@ function App() {
             }
         };
 
-        initializeApp();
+        initializeApp().catch((error) => {
+            console.error("Failed to initialize app:", error);
+            setErrorMessage(
+                `Failed to initialize app: ${toErrorMessage(error)}`,
+            );
+        });
     }, []);
 
     useEffect(() => {
@@ -297,6 +363,7 @@ function App() {
             const timer = setTimeout(() => {
                 setStatus("idle");
                 setProgress(null);
+                setErrorMessage(null);
                 setUrl("");
                 setProcessingStartTime(null);
                 setProcessingElapsed(0);
@@ -307,6 +374,13 @@ function App() {
             return () => clearTimeout(timer);
         }
     }, [status]);
+
+    // Auto-dismiss error messages that are not tied to a download status
+    useEffect(() => {
+        if (!errorMessage || status !== "idle") return;
+        const timer = setTimeout(() => setErrorMessage(null), 8000);
+        return () => clearTimeout(timer);
+    }, [errorMessage, status]);
 
     // Update elapsed time during processing phase
     useEffect(() => {
@@ -373,6 +447,7 @@ function App() {
         setIsDownloading(true);
         setStatus("downloading");
         setProgress(null);
+        setErrorMessage(null);
 
         // Store download info for later use in completion handler
         downloadInfoRef.current = {
@@ -406,6 +481,7 @@ function App() {
             // The actual completion and archive addition will be handled by the download-complete event
         } catch (error) {
             console.error("Failed to start download:", error);
+            setErrorMessage(toErrorMessage(error));
             setStatus("error");
             setIsDownloading(false);
             setCurrentDownloadId(null);
@@ -425,6 +501,11 @@ function App() {
             console.log("Download cancelled successfully");
         } catch (error) {
             console.error("Failed to cancel download:", error);
+            setErrorMessage(
+                `Failed to cancel download: ${toErrorMessage(error)}`,
+            );
+            setStatus("error");
+            setIsDownloading(false);
         }
     };
 
@@ -449,6 +530,7 @@ function App() {
         // Don't attempt to open if we know the file doesn't exist
         if (fileExists === false) {
             console.warn("Cannot open file - file does not exist:", path);
+            setErrorMessage("File no longer exists on disk");
             return;
         }
 
@@ -462,6 +544,9 @@ function App() {
                 await invoke("open_file_location", { path });
             } catch (fallbackError) {
                 console.error("Fallback to folder also failed:", fallbackError);
+                setErrorMessage(
+                    `Could not open file (${toErrorMessage(error)}) or its folder (${toErrorMessage(fallbackError)})`,
+                );
             }
         }
     };
@@ -473,17 +558,19 @@ function App() {
         try {
             // Recycle the actual file
             await invoke("recycle_file", { path: item.path });
-
-            // Remove from archive
-            const newArchive = archive.filter((item) => item.id !== id);
-            setArchive(newArchive);
-            localStorage.setItem("ripvid-archive", JSON.stringify(newArchive));
         } catch (error) {
+            // Still remove from archive even if file recycling fails, but tell the user
             console.error("Failed to recycle file:", error);
-            // Still remove from archive even if file recycling fails
-            const newArchive = archive.filter((item) => item.id !== id);
-            setArchive(newArchive);
-            localStorage.setItem("ripvid-archive", JSON.stringify(newArchive));
+            setErrorMessage(
+                `Removed from archive, but the file could not be deleted: ${toErrorMessage(error)}`,
+            );
+        }
+
+        const newArchive = archive.filter((entry) => entry.id !== id);
+        setArchive(newArchive);
+        const saveError = persistArchive(newArchive);
+        if (saveError) {
+            setErrorMessage(`Failed to update archive: ${saveError}`);
         }
     };
 
@@ -502,6 +589,9 @@ function App() {
             console.log("Folder structure created successfully");
         } catch (error) {
             console.error("Failed to create folder structure:", error);
+            setErrorMessage(
+                `Could not create the ripVID download folders: ${toErrorMessage(error)}`,
+            );
         }
     };
 
@@ -522,7 +612,10 @@ function App() {
         );
 
         setArchive(updatedArchive);
-        localStorage.setItem("ripvid-archive", JSON.stringify(updatedArchive));
+        const saveError = persistArchive(updatedArchive);
+        if (saveError) {
+            setErrorMessage(`Failed to update archive: ${saveError}`);
+        }
     };
 
     // Refresh archive by scanning actual download folders
@@ -561,10 +654,10 @@ function App() {
             if (newItems.length > 0) {
                 const mergedArchive = [...archive, ...newItems];
                 setArchive(mergedArchive);
-                localStorage.setItem(
-                    "ripvid-archive",
-                    JSON.stringify(mergedArchive),
-                );
+                const saveError = persistArchive(mergedArchive);
+                if (saveError) {
+                    setErrorMessage(`Failed to update archive: ${saveError}`);
+                }
                 console.log(
                     `Added ${newItems.length} files from disk to archive`,
                 );
@@ -576,30 +669,51 @@ function App() {
             await verifyArchiveFiles(archive);
         } catch (error) {
             console.error("Failed to refresh archive:", error);
+            setErrorMessage(
+                `Failed to refresh archive: ${toErrorMessage(error)}`,
+            );
         }
     };
 
     const handleAcceptTerms = async () => {
-        localStorage.setItem("ripvid-terms-accepted", "true");
+        try {
+            localStorage.setItem("ripvid-terms-accepted", "true");
+        } catch (error) {
+            console.error("Failed to persist terms acceptance:", error);
+        }
         setShowTerms(false);
         await setupFolderStructure();
     };
 
     const handleDeclineTerms = () => {
         // Close the app if terms are declined
-        const appWindow = getCurrentWebviewWindow();
-        appWindow.close();
+        getCurrentWebviewWindow()
+            .close()
+            .catch((error) => {
+                console.error("Failed to close window:", error);
+                setErrorMessage(
+                    `Failed to close the app: ${toErrorMessage(error)}`,
+                );
+            });
     };
 
     const toggleFormat = () => {
         const newFormat = downloadFormat === "mp4" ? "mp3" : "mp4";
         setDownloadFormat(newFormat);
-        localStorage.setItem("ripvid-format", newFormat);
+        try {
+            localStorage.setItem("ripvid-format", newFormat);
+        } catch (error) {
+            console.error("Failed to persist format preference:", error);
+        }
     };
 
     const handleQualityChange = (newQuality: string) => {
         setQuality(newQuality);
-        localStorage.setItem("ripvid-quality", newQuality);
+        try {
+            localStorage.setItem("ripvid-quality", newQuality);
+        } catch (error) {
+            console.error("Failed to persist quality preference:", error);
+        }
     };
 
     const getFilteredArchive = () => {
@@ -666,11 +780,23 @@ function App() {
         }
 
         if (status === "error") {
-            return <div className="error-text">Download failed</div>;
+            return (
+                <div className="error-text" title={errorMessage ?? undefined}>
+                    {errorMessage ?? "Download failed"}
+                </div>
+            );
         }
 
         if (status === "cancelled") {
             return <div className="cancelled-text">Download cancelled</div>;
+        }
+
+        if (errorMessage) {
+            return (
+                <div className="error-text" title={errorMessage}>
+                    {errorMessage}
+                </div>
+            );
         }
 
         return null;
@@ -805,7 +931,7 @@ function App() {
                         )}
                     </div>
                     <div
-                        className={`status-info ${status !== "idle" ? "active" : ""}`}
+                        className={`status-info ${status !== "idle" || errorMessage ? "active" : ""}`}
                     >
                         {getStatusContent()}
                     </div>

@@ -254,35 +254,30 @@ fn open_file_location(path: String) -> Result<(), String> {
         if let Some(parent) = path_buf.parent() {
             let parent_str = parent.to_string_lossy().to_string();
 
-            // Try xdg-open first
-            if Command::new("xdg-open").arg(&parent_str).spawn().is_ok() {
-                info!("Successfully opened file manager with xdg-open");
-                return Ok(());
+            // Try xdg-open first, then desktop-specific file managers
+            let attempts: [(&str, Vec<&str>); 3] = [
+                ("xdg-open", vec![parent_str.as_str()]),
+                ("nautilus", vec!["--select", path_str.as_str()]),
+                ("dolphin", vec!["--select", path_str.as_str()]),
+            ];
+
+            let mut failures = Vec::new();
+            for (program, args) in attempts {
+                match Command::new(program).args(&args).spawn() {
+                    Ok(_) => {
+                        info!("Successfully opened file manager with {}", program);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!("Failed to open file manager with {}: {}", program, e);
+                        failures.push(format!("{}: {}", program, e));
+                    }
+                }
             }
 
-            // Try nautilus (GNOME)
-            if Command::new("nautilus")
-                .arg("--select")
-                .arg(&path_str)
-                .spawn()
-                .is_ok()
-            {
-                info!("Successfully opened Nautilus");
-                return Ok(());
-            }
-
-            // Try dolphin (KDE)
-            if Command::new("dolphin")
-                .arg("--select")
-                .arg(&path_str)
-                .spawn()
-                .is_ok()
-            {
-                info!("Successfully opened Dolphin");
-                return Ok(());
-            }
-
-            return open_folder_fallback(parent_str);
+            return open_folder_fallback(parent_str).map_err(|e| {
+                format!("{} (also tried {})", e, failures.join(", "))
+            });
         }
         return Err("Could not open file location on Linux".to_string());
     }
@@ -435,63 +430,69 @@ async fn scan_downloads_folder() -> Result<Vec<serde_json::Value>, String> {
     let ripvid_base = home.join("ripVID");
 
     let mut files = Vec::new();
+    let mut failures = Vec::new();
 
-    // Scan MP4 folder
-    let mp4_dir = ripvid_base.join("MP4");
-    if mp4_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&mp4_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        let path = entry.path();
-                        let filename = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
+    for format in ["MP4", "MP3"] {
+        let dir = ripvid_base.join(format);
+        if !dir.exists() {
+            continue;
+        }
 
-                        files.push(json!({
-                            "path": path.to_string_lossy().to_string(),
-                            "filename": filename,
-                            "format": "mp4",
-                            "size": metadata.len(),
-                            "modified": metadata.modified()
-                                .ok()
-                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs())
-                        }));
-                    }
-                }
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                error!("Failed to read downloads directory {:?}: {}", dir, e);
+                failures.push(format!("{}: {}", dir.display(), e));
+                continue;
             }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    warn!("Failed to read an entry in {:?}: {}", dir, e);
+                    continue;
+                }
+            };
+
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    warn!("Failed to read metadata for {:?}: {}", entry.path(), e);
+                    continue;
+                }
+            };
+
+            if !metadata.is_file() {
+                continue;
+            }
+
+            let path = entry.path();
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+
+            files.push(json!({
+                "path": path.to_string_lossy().to_string(),
+                "filename": filename,
+                "format": format.to_lowercase(),
+                "size": metadata.len(),
+                "modified": metadata.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+            }));
         }
     }
 
-    // Scan MP3 folder
-    let mp3_dir = ripvid_base.join("MP3");
-    if mp3_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&mp3_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        let path = entry.path();
-                        let filename = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-
-                        files.push(json!({
-                            "path": path.to_string_lossy().to_string(),
-                            "filename": filename,
-                            "format": "mp3",
-                            "size": metadata.len(),
-                            "modified": metadata.modified()
-                                .ok()
-                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs())
-                        }));
-                    }
-                }
-            }
-        }
+    // Only fail when nothing could be scanned - a partial listing is still useful
+    if files.is_empty() && !failures.is_empty() {
+        return Err(format!(
+            "Failed to scan downloads folder: {}",
+            failures.join(", ")
+        ));
     }
 
     info!("Scanned downloads folder, found {} files", files.len());
@@ -505,10 +506,13 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Initialize logging
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let app_data_dir = app.path().app_data_dir().unwrap_or_else(|e| {
+                eprintln!(
+                    "Could not resolve app data directory ({}), falling back to current directory",
+                    e
+                );
+                std::path::PathBuf::from(".")
+            });
 
             if let Err(e) = logging::init_logging(app_data_dir.clone()) {
                 eprintln!("Failed to initialize logging: {}", e);
