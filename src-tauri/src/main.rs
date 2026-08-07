@@ -22,6 +22,7 @@ use binary_manager::BinaryManager;
 use download::{
     cancel_download, download_content_with_smart_retry, DownloadHandle, DownloadType,
 };
+use validation::{validate_output_path, validate_path, validate_url};
 
 /// Application state shared across all commands
 struct AppState {
@@ -34,18 +35,28 @@ struct AppState {
 async fn detect_platform(url: String) -> Result<String, String> {
     info!("Detecting platform for URL: {}", url);
 
-    if url.contains("youtube.com") || url.contains("youtu.be") {
+    let validated = validate_url(&url)?;
+    let host = url::Url::parse(&validated)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+        .ok_or_else(|| "URL must have a valid host".to_string())?;
+
+    // Match on the registrable host, not a substring, so lookalike hosts such as
+    // `youtube.com.attacker.example` are not accepted
+    let matches_domain = |domain: &str| host == domain || host.ends_with(&format!(".{}", domain));
+
+    if matches_domain("youtube.com") || matches_domain("youtu.be") {
         Ok("youtube".to_string())
-    } else if url.contains("x.com") || url.contains("twitter.com") {
+    } else if matches_domain("x.com") || matches_domain("twitter.com") {
         Ok("x".to_string())
-    } else if url.contains("facebook.com") || url.contains("fb.watch") {
+    } else if matches_domain("facebook.com") || matches_domain("fb.watch") {
         Ok("facebook".to_string())
-    } else if url.contains("instagram.com") {
+    } else if matches_domain("instagram.com") {
         Ok("instagram".to_string())
-    } else if url.contains("tiktok.com") {
+    } else if matches_domain("tiktok.com") {
         Ok("tiktok".to_string())
     } else {
-        warn!("Unsupported platform: {}", url);
+        warn!("Unsupported platform: {}", host);
         Err("Unsupported platform".to_string())
     }
 }
@@ -55,6 +66,8 @@ async fn detect_platform(url: String) -> Result<String, String> {
 async fn get_video_info(url: String, app: tauri::AppHandle) -> Result<String, String> {
     info!("Fetching video info for: {}", url);
 
+    let url = validate_url(&url)?;
+
     let output = app
         .shell()
         .sidecar("yt-dlp")
@@ -62,7 +75,7 @@ async fn get_video_info(url: String, app: tauri::AppHandle) -> Result<String, St
             error!("Failed to create sidecar: {}", e);
             e.to_string()
         })?
-        .args(&["--no-playlist", "--dump-json", &url])
+        .args(&["--no-playlist", "--dump-json", "--", &url])
         .output()
         .await
         .map_err(|e| {
@@ -95,6 +108,11 @@ async fn download_video(
 ) -> Result<String, String> {
     info!("Video download requested: url={}, quality={}", url, quality);
 
+    let url = validate_url(&url)?;
+    let output_path = validate_output_path(&output_path)?
+        .to_string_lossy()
+        .to_string();
+
     // Use smart retry - no manual cookie configuration needed
     download_content_with_smart_retry(
         url,
@@ -121,6 +139,11 @@ async fn download_audio(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     info!("Audio download requested: url={}", url);
+
+    let url = validate_url(&url)?;
+    let output_path = validate_output_path(&output_path)?
+        .to_string_lossy()
+        .to_string();
 
     // Use smart retry - no manual cookie configuration needed
     download_content_with_smart_retry(
@@ -154,8 +177,9 @@ async fn cancel_download_command(
 #[tauri::command]
 fn create_directory(path: String) -> Result<(), String> {
     info!("Creating directory: {}", path);
+    let path = validate_output_path(&path)?;
     fs::create_dir_all(&path).map_err(|e| {
-        error!("Failed to create directory {}: {}", path, e);
+        error!("Failed to create directory {}: {}", path.display(), e);
         e.to_string()
     })
 }
@@ -166,23 +190,9 @@ fn create_directory(path: String) -> Result<(), String> {
 fn open_file_location(path: String) -> Result<(), String> {
     info!("Opening file location: {}", path);
 
-    // Basic security: ensure path is within user's home directory
-    // But be more lenient to handle edge cases
-    let path_buf = std::path::PathBuf::from(&path);
-
-    // Check if path is absolute (basic security)
-    if !path_buf.is_absolute() {
-        warn!("Rejected relative path: {}", path);
-        return Err("Invalid path: must be absolute".to_string());
-    }
-
-    // Ensure path is within safe directories
-    if let Some(home) = dirs::home_dir() {
-        if !path.starts_with(home.to_string_lossy().as_ref()) {
-            warn!("Path outside home directory: {}", path);
-            return Err("Access denied: path outside allowed directories".to_string());
-        }
-    }
+    // Normalizes the path and confirms it stays inside the user's home/temp directories
+    let path_buf = validate_output_path(&path)?;
+    let path = path_buf.to_string_lossy().to_string();
 
     // Try to open the exact file if it exists
     if path_buf.exists() && path_buf.is_file() {
@@ -347,8 +357,9 @@ fn open_folder_fallback(path: String) -> Result<(), String> {
 #[tauri::command]
 fn recycle_file(path: String) -> Result<(), String> {
     info!("Moving file to recycle bin: {}", path);
+    let path = validate_path(&path, false)?;
     trash::delete(&path).map_err(|e| {
-        error!("Failed to recycle file {}: {}", path, e);
+        error!("Failed to recycle file {}: {}", path.display(), e);
         e.to_string()
     })
 }
@@ -356,8 +367,10 @@ fn recycle_file(path: String) -> Result<(), String> {
 /// Check if a file exists at the given path
 #[tauri::command]
 fn file_exists(path: String) -> Result<bool, String> {
-    let path_buf = std::path::PathBuf::from(&path);
-    Ok(path_buf.exists() && path_buf.is_file())
+    match validate_path(&path, true) {
+        Ok(path_buf) => Ok(path_buf.exists() && path_buf.is_file()),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Open a file directly with the system's default application
@@ -365,24 +378,11 @@ fn file_exists(path: String) -> Result<bool, String> {
 fn open_file_directly(path: String) -> Result<(), String> {
     info!("Opening file directly: {}", path);
 
-    let path_buf = std::path::PathBuf::from(&path);
+    // Normalizes the path and confirms it stays inside the user's home/temp directories
+    let path_buf = validate_path(&path, false)?;
+    let path = path_buf.to_string_lossy().to_string();
 
-    // Basic security: ensure path is absolute
-    if !path_buf.is_absolute() {
-        warn!("Rejected relative path: {}", path);
-        return Err("Invalid path: must be absolute".to_string());
-    }
-
-    // Ensure path is within home directory
-    if let Some(home) = dirs::home_dir() {
-        if !path.starts_with(home.to_string_lossy().as_ref()) {
-            warn!("Path outside home directory: {}", path);
-            return Err("Access denied: path outside allowed directories".to_string());
-        }
-    }
-
-    // Check if file exists
-    if !path_buf.exists() {
+    if !path_buf.is_file() {
         warn!("File not found: {}", path);
         return Err("File not found".to_string());
     }
@@ -559,4 +559,34 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn detect_platform_matches_host_not_substring() {
+        assert_eq!(
+            detect_platform("https://www.youtube.com/watch?v=abc".to_string())
+                .await
+                .unwrap(),
+            "youtube"
+        );
+        assert!(
+            detect_platform("https://youtube.com.attacker.example/watch".to_string())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_platform_rejects_non_http_urls() {
+        assert!(detect_platform("file:///etc/passwd".to_string())
+            .await
+            .is_err());
+        assert!(detect_platform("--exec=touch /tmp/pwned".to_string())
+            .await
+            .is_err());
+    }
 }
