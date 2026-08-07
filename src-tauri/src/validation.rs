@@ -249,6 +249,42 @@ pub fn validate_output_path(path_str: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// A directory under the user's home directory that is removed on drop.
+    /// `validate_path` only accepts paths inside the home or temp directory.
+    struct TempHomeDir(PathBuf);
+
+    impl TempHomeDir {
+        fn new() -> Self {
+            let unique = format!(
+                "ripvid-validation-test-{}-{}",
+                std::process::id(),
+                TEST_DIR_COUNTER.fetch_add(1, Ordering::SeqCst)
+            );
+            let path = dirs::home_dir()
+                .expect("home directory is required for these tests")
+                .join(unique);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn join(&self, name: &str) -> String {
+            self.0.join(name).to_string_lossy().to_string()
+        }
+
+        fn path(&self) -> String {
+            self.0.to_string_lossy().to_string()
+        }
+    }
+
+    impl Drop for TempHomeDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
 
     #[test]
     fn test_validate_url_valid() {
@@ -285,5 +321,118 @@ mod tests {
     #[test]
     fn test_validate_path_null_bytes() {
         assert!(validate_path("/home/user/file\0.txt", false).is_err());
+    }
+
+    #[test]
+    fn test_validate_url_normalizes_and_returns_parsed_url() {
+        assert_eq!(
+            validate_url("https://example.com").unwrap(),
+            "https://example.com/"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_too_long() {
+        let long_url = format!("https://example.com/{}", "a".repeat(2048));
+        let error = validate_url(&long_url).unwrap_err();
+        assert!(error.contains("too long"));
+    }
+
+    #[test]
+    fn test_validate_url_malformed() {
+        assert!(validate_url("not a url").is_err());
+        assert!(validate_url("https://").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_allows_dangerous_characters_in_query_only() {
+        // Query strings may legitimately contain these characters
+        assert!(validate_url("https://example.com/watch?v=a&list=b").is_ok());
+        // The same character before the query is rejected
+        assert!(validate_url("https://example.com/a&b").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_rejects_control_characters() {
+        let error = validate_url("https://example.com/vid\u{7}eo").unwrap_err();
+        assert!(error.contains("control character"));
+    }
+
+    #[test]
+    fn test_validate_path_accepts_existing_directory_in_home() {
+        let dir = TempHomeDir::new();
+        let validated = validate_path(&dir.path(), false).unwrap();
+        assert!(validated.is_absolute());
+        assert!(validated.exists());
+    }
+
+    #[test]
+    fn test_validate_path_rejects_missing_path_when_not_allowed() {
+        let dir = TempHomeDir::new();
+        let error = validate_path(&dir.join("missing.mp4"), false).unwrap_err();
+        assert!(error.contains("does not exist"));
+    }
+
+    #[test]
+    fn test_validate_path_allows_missing_file_with_existing_parent() {
+        let dir = TempHomeDir::new();
+        let target = dir.join("video.mp4");
+        let validated = validate_path(&target, true).unwrap();
+        assert_eq!(validated.file_name().unwrap(), "video.mp4");
+    }
+
+    #[test]
+    fn test_validate_path_rejects_missing_parent() {
+        let dir = TempHomeDir::new();
+        let target = dir.join("nested/video.mp4");
+        let error = validate_path(&target, true).unwrap_err();
+        assert!(error.contains("Parent directory does not exist"));
+    }
+
+    #[test]
+    fn test_validate_path_rejects_relative_and_empty_paths() {
+        assert!(validate_path("relative/video.mp4", true).is_err());
+        assert_eq!(validate_path("", true).unwrap_err(), "Path cannot be empty");
+        assert!(validate_path("   ", true).is_err());
+    }
+
+    #[test]
+    fn test_validate_path_too_long() {
+        let long_path = format!("/{}", "a".repeat(4096));
+        let error = validate_path(&long_path, true).unwrap_err();
+        assert!(error.contains("too long"));
+    }
+
+    #[test]
+    fn test_validate_path_rejects_outside_home_and_temp() {
+        let outside = if cfg!(windows) {
+            "C:\\Windows\\System32"
+        } else {
+            "/usr/local"
+        };
+        assert!(validate_path(outside, false).is_err());
+    }
+
+    #[test]
+    fn test_validate_path_rejects_system_directory_names() {
+        let dir = TempHomeDir::new();
+        let subdir = if cfg!(windows) {
+            "program files"
+        } else {
+            "etc"
+        };
+        std::fs::create_dir(dir.join(subdir)).unwrap();
+
+        let blocked = format!("{}/video.mp4", dir.join(subdir));
+        let error = validate_path(&blocked, true).unwrap_err();
+        assert!(error.contains("system directory"));
+    }
+
+    #[test]
+    fn test_validate_output_path_allows_nonexistent_file() {
+        let dir = TempHomeDir::new();
+        let target = dir.join("output.mp3");
+        assert!(validate_output_path(&target).is_ok());
+        assert!(validate_output_path(&dir.join("nested/output.mp3")).is_err());
     }
 }

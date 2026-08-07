@@ -96,3 +96,152 @@ pub fn is_ffmpeg_error(stderr: &str) -> bool {
             || stderr.contains("'lower'")
             || stderr.contains("FFmpeg"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display_messages() {
+        assert_eq!(
+            DownloadError::InvalidUrl("bad".into()).to_string(),
+            "Invalid URL: bad"
+        );
+        assert_eq!(
+            DownloadError::InvalidInput("bad".into()).to_string(),
+            "Invalid input: bad"
+        );
+        assert_eq!(
+            DownloadError::Network("offline".into()).to_string(),
+            "Network error: offline"
+        );
+        assert_eq!(
+            DownloadError::ProcessFailed("exit 1".into()).to_string(),
+            "Process failed: exit 1"
+        );
+        assert_eq!(
+            DownloadError::Sidecar("missing".into()).to_string(),
+            "Sidecar error: missing"
+        );
+        assert_eq!(
+            DownloadError::Authentication("login".into()).to_string(),
+            "Authentication error: login"
+        );
+        assert_eq!(
+            DownloadError::RateLimit("429".into()).to_string(),
+            "Rate limit exceeded: 429"
+        );
+        assert_eq!(
+            DownloadError::Cancelled.to_string(),
+            "Download cancelled by user"
+        );
+        assert_eq!(
+            DownloadError::QualityNotAvailable("8k".into()).to_string(),
+            "Quality not available: 8k"
+        );
+        assert_eq!(
+            DownloadError::BrowserNotFound("firefox".into()).to_string(),
+            "Browser not found: firefox"
+        );
+        assert_eq!(
+            DownloadError::ParseError("json".into()).to_string(),
+            "Failed to parse output: json"
+        );
+        assert_eq!(
+            DownloadError::Unknown("???".into()).to_string(),
+            "Unknown error: ???"
+        );
+    }
+
+    #[test]
+    fn test_error_from_io_error() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let error: DownloadError = io_error.into();
+        assert!(matches!(error, DownloadError::Io(_)));
+        assert_eq!(error.to_string(), "IO error: no such file");
+    }
+
+    #[test]
+    fn test_error_into_string() {
+        let message: String = DownloadError::Cancelled.into();
+        assert_eq!(message, "Download cancelled by user");
+    }
+
+    #[test]
+    fn test_is_retryable_error() {
+        assert!(is_retryable_error(&DownloadError::Network("x".into())));
+        assert!(is_retryable_error(&DownloadError::RateLimit("x".into())));
+        assert!(is_retryable_error(&DownloadError::ProcessFailed(
+            "x".into()
+        )));
+
+        assert!(!is_retryable_error(&DownloadError::Cancelled));
+        assert!(!is_retryable_error(&DownloadError::InvalidUrl("x".into())));
+        assert!(!is_retryable_error(&DownloadError::Authentication(
+            "x".into()
+        )));
+        assert!(!is_retryable_error(&DownloadError::Unknown("x".into())));
+    }
+
+    #[test]
+    fn test_is_network_error() {
+        assert!(is_network_error("ERROR: Unable to download webpage"));
+        assert!(is_network_error("HTTP Error 503: Service Unavailable"));
+        assert!(is_network_error("Connection reset by peer"));
+        assert!(is_network_error("read timeout after 30s"));
+        assert!(is_network_error("network is unreachable"));
+
+        assert!(!is_network_error(""));
+        assert!(!is_network_error("Video unavailable"));
+    }
+
+    #[test]
+    fn test_is_rate_limit_error() {
+        assert!(is_rate_limit_error("You have exceeded the rate limit"));
+        assert!(is_rate_limit_error("HTTP Error 429"));
+        assert!(is_rate_limit_error("Too Many Requests"));
+
+        assert!(!is_rate_limit_error(""));
+        assert!(!is_rate_limit_error("HTTP Error 404"));
+    }
+
+    #[test]
+    fn test_is_auth_error() {
+        assert!(is_auth_error("Sign in to confirm your age"));
+        assert!(is_auth_error("Private video"));
+        assert!(is_auth_error("This video is members-only content"));
+        assert!(is_auth_error("This video is only available to subscribers"));
+        assert!(is_auth_error("login required"));
+
+        assert!(!is_auth_error(""));
+        assert!(!is_auth_error("Video unavailable"));
+    }
+
+    #[test]
+    fn test_is_dpapi_error() {
+        assert!(is_dpapi_error("Failed to decrypt with DPAPI"));
+        assert!(is_dpapi_error("DPAPI"));
+        assert!(is_dpapi_error("could not decrypt cookie value"));
+
+        assert!(!is_dpapi_error(""));
+        // "decrypt" alone, without "cookie", is not a DPAPI error
+        assert!(!is_dpapi_error("failed to decrypt stream"));
+    }
+
+    #[test]
+    fn test_is_ffmpeg_error() {
+        assert!(is_ffmpeg_error("ffmpeg not found"));
+        assert!(is_ffmpeg_error("[Merger] ffmpeg does not exist"));
+        assert!(is_ffmpeg_error(
+            "merge failed: 'NoneType' object has no attribute"
+        ));
+        assert!(is_ffmpeg_error("Merger error: 'lower'"));
+        assert!(is_ffmpeg_error("merge aborted: FFmpeg"));
+
+        assert!(!is_ffmpeg_error(""));
+        // Mentions ffmpeg but no failure indicator
+        assert!(!is_ffmpeg_error("[ffmpeg] Destination: video.mp4"));
+        // Failure indicator but unrelated to ffmpeg
+        assert!(!is_ffmpeg_error("cookie file not found"));
+    }
+}

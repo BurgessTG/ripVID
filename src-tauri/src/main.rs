@@ -560,3 +560,176 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// A directory under the user's home directory that is removed on drop.
+    /// Commands under test only accept paths inside the home directory.
+    struct TempHomeDir(PathBuf);
+
+    impl TempHomeDir {
+        fn new() -> Self {
+            let unique = format!(
+                "ripvid-test-{}-{}",
+                std::process::id(),
+                TEST_DIR_COUNTER.fetch_add(1, Ordering::SeqCst)
+            );
+            let path = dirs::home_dir()
+                .expect("home directory is required for these tests")
+                .join(unique);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn join(&self, name: &str) -> String {
+            self.0.join(name).to_string_lossy().to_string()
+        }
+
+        fn path(&self) -> String {
+            self.0.to_string_lossy().to_string()
+        }
+    }
+
+    impl Drop for TempHomeDir {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_detect_platform_supported_sites() {
+        for (url, expected) in [
+            ("https://www.youtube.com/watch?v=abc", "youtube"),
+            ("https://youtu.be/abc", "youtube"),
+            ("https://x.com/user/status/1", "x"),
+            ("https://twitter.com/user/status/1", "x"),
+            ("https://www.facebook.com/watch/?v=1", "facebook"),
+            ("https://fb.watch/abc", "facebook"),
+            ("https://www.instagram.com/reel/abc", "instagram"),
+            ("https://www.tiktok.com/@user/video/1", "tiktok"),
+        ] {
+            assert_eq!(detect_platform(url.to_string()).await.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_detect_platform_unsupported_site() {
+        assert_eq!(
+            detect_platform("https://example.com/video".to_string())
+                .await
+                .unwrap_err(),
+            "Unsupported platform"
+        );
+        assert!(detect_platform(String::new()).await.is_err());
+    }
+
+    #[test]
+    fn test_create_directory_creates_nested_directories() {
+        let dir = TempHomeDir::new();
+        let nested = dir.join("MP4/subfolder");
+
+        create_directory(nested.clone()).unwrap();
+        assert!(std::path::Path::new(&nested).is_dir());
+
+        // Creating an existing directory succeeds
+        create_directory(nested).unwrap();
+    }
+
+    #[test]
+    fn test_file_exists_distinguishes_files_from_directories() {
+        let dir = TempHomeDir::new();
+        let file = dir.join("video.mp4");
+        fs::write(&file, b"data").unwrap();
+
+        assert!(file_exists(file).unwrap());
+        assert!(!file_exists(dir.path()).unwrap());
+        assert!(!file_exists(dir.join("missing.mp4")).unwrap());
+    }
+
+    #[test]
+    fn test_open_file_location_rejects_relative_path() {
+        assert_eq!(
+            open_file_location("relative/video.mp4".to_string()).unwrap_err(),
+            "Invalid path: must be absolute"
+        );
+    }
+
+    #[test]
+    fn test_open_file_location_rejects_path_outside_home() {
+        let outside = if cfg!(windows) {
+            "C:\\Windows\\System32\\config"
+        } else {
+            "/etc/passwd"
+        };
+        assert_eq!(
+            open_file_location(outside.to_string()).unwrap_err(),
+            "Access denied: path outside allowed directories"
+        );
+    }
+
+    #[test]
+    fn test_open_file_location_reports_missing_file_without_parent() {
+        let dir = TempHomeDir::new();
+        let missing = dir.join("gone/video.mp4");
+
+        assert_eq!(
+            open_file_location(missing).unwrap_err(),
+            "File not found. It may have been moved or deleted."
+        );
+    }
+
+    #[test]
+    fn test_open_file_directly_rejects_relative_path() {
+        assert_eq!(
+            open_file_directly("relative/video.mp4".to_string()).unwrap_err(),
+            "Invalid path: must be absolute"
+        );
+    }
+
+    #[test]
+    fn test_open_file_directly_rejects_path_outside_home() {
+        let outside = if cfg!(windows) {
+            "C:\\Windows\\System32\\config"
+        } else {
+            "/etc/passwd"
+        };
+        assert_eq!(
+            open_file_directly(outside.to_string()).unwrap_err(),
+            "Access denied: path outside allowed directories"
+        );
+    }
+
+    #[test]
+    fn test_open_file_directly_rejects_missing_file() {
+        let dir = TempHomeDir::new();
+        assert_eq!(
+            open_file_directly(dir.join("missing.mp4")).unwrap_err(),
+            "File not found"
+        );
+    }
+
+    #[test]
+    fn test_recycle_file_reports_error_for_missing_file() {
+        let dir = TempHomeDir::new();
+        assert!(recycle_file(dir.join("missing.mp4")).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_scan_downloads_folder_entries_have_expected_shape() {
+        let files = scan_downloads_folder().await.unwrap();
+
+        for file in files {
+            assert!(file["path"].is_string());
+            assert!(file["filename"].is_string());
+            let format = file["format"].as_str().unwrap();
+            assert!(format == "mp4" || format == "mp3");
+            assert!(file["size"].is_u64());
+        }
+    }
+}
