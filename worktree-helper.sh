@@ -3,8 +3,17 @@
 # Worktree Helper Script for ripVID
 # Provides easy commands for common worktree operations
 
-REPO_DIR="/home/user/ripVID"
-WORKTREES_DIR="/home/user/ripVID-worktrees"
+# Detect the repository root from wherever the script lives so this works on
+# any machine, not just the environment it was authored in.
+REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+WORKTREES_DIR="$(dirname "$REPO_DIR")/$(basename "$REPO_DIR")-worktrees"
+
+# Pick a JS package manager: prefer Bun (repo ships bun.lock), fall back to npm.
+if command -v bun >/dev/null 2>&1; then
+    PKG_MANAGER="bun"
+else
+    PKG_MANAGER="npm"
+fi
 
 # Colors
 GREEN='\033[0;32m'
@@ -69,13 +78,13 @@ cmd_new() {
 
     print_info "Installing dependencies..."
     cd "$worktree_path"
-    npm install
+    "$PKG_MANAGER" install
 
     print_status "Worktree created and ready!"
     echo ""
     echo "To start working:"
     echo "  cd $worktree_path"
-    echo "  npm run tauri:dev"
+    echo "  $PKG_MANAGER run tauri:dev"
 }
 
 cmd_add() {
@@ -107,13 +116,13 @@ cmd_add() {
 
     print_info "Installing dependencies..."
     cd "$worktree_path"
-    npm install
+    "$PKG_MANAGER" install
 
     print_status "Worktree created and ready!"
     echo ""
     echo "To start working:"
     echo "  cd $worktree_path"
-    echo "  npm run tauri:dev"
+    echo "  $PKG_MANAGER run tauri:dev"
 }
 
 cmd_list() {
