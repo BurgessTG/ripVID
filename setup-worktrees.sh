@@ -13,9 +13,19 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-REPO_DIR="/home/user/ripVID"
-WORKTREES_DIR="/home/user/ripVID-worktrees"
-CURRENT_BRANCH="claude/full-codebase-audit-011CUpyG3C2tZ8kuMuuqc7gs"
+# Detect the repository root from wherever the script is invoked so this works
+# on any machine, not just the environment it was authored in.
+REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+WORKTREES_DIR="$(dirname "$REPO_DIR")/$(basename "$REPO_DIR")-worktrees"
+# Default to whatever branch is currently checked out.
+CURRENT_BRANCH="$(git -C "$REPO_DIR" branch --show-current 2>/dev/null)"
+
+# Pick a JS package manager: prefer Bun (repo ships bun.lock), fall back to npm.
+if command -v bun >/dev/null 2>&1; then
+    PKG_MANAGER="bun"
+else
+    PKG_MANAGER="npm"
+fi
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  ripVID Worktree Setup Script${NC}"
@@ -40,8 +50,15 @@ print_info() {
 }
 
 # Check if we're in the right directory
-if [ ! -d "$REPO_DIR/.git" ]; then
+if [ ! -e "$REPO_DIR/.git" ]; then
     print_error "Not in a git repository at $REPO_DIR"
+    print_info "Run this script from inside the ripVID repository."
+    exit 1
+fi
+
+if [ -z "$CURRENT_BRANCH" ]; then
+    print_error "Could not determine the current branch (detached HEAD?)."
+    print_info "Check out a branch before running this script."
     exit 1
 fi
 
@@ -122,9 +139,9 @@ if [ "$SKIP_WORKTREE" != "true" ]; then
     print_status "Worktree created at: $WORKTREE_PATH"
 
     # Install dependencies
-    print_info "Installing dependencies in worktree..."
+    print_info "Installing dependencies in worktree (using $PKG_MANAGER)..."
     cd "$WORKTREE_PATH"
-    npm install
+    "$PKG_MANAGER" install
     print_status "Dependencies installed"
     cd "$REPO_DIR"
 fi
@@ -149,24 +166,24 @@ if [ "$SKIP_HOOK" != "true" ]; then
 #!/bin/bash
 
 # Branch protection hook for ripVID
-# Prevents direct commits to main branch in main directory
+# Prevents direct commits to the main branch in the primary worktree.
 
-branch=$(git symbolic-ref --short HEAD)
-worktree=$(git rev-parse --show-toplevel)
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+worktree=$(git rev-parse --show-toplevel 2>/dev/null)
 
-if [ "$branch" = "main" ] && [ "$worktree" = "/home/user/ripVID" ]; then
+# The first entry of `git worktree list` is always the primary (main) worktree.
+primary_worktree=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')
+
+if [ "$branch" = "main" ] && [ "$worktree" = "$primary_worktree" ]; then
     echo "=========================================="
     echo "ERROR: Direct commits to main are blocked!"
     echo "=========================================="
     echo ""
     echo "Please use a worktree for development:"
     echo "  1. Create worktree:"
-    echo "     git worktree add -b feature-name /home/user/ripVID-worktrees/feature-name"
+    echo "     git worktree add -b feature-name ../$(basename "$worktree")-worktrees/feature-name"
     echo ""
-    echo "  2. Develop in worktree:"
-    echo "     cd /home/user/ripVID-worktrees/feature-name"
-    echo ""
-    echo "  3. Merge via PR when ready"
+    echo "  2. Develop in the worktree, then merge via PR when ready."
     echo ""
     exit 1
 fi
@@ -185,23 +202,23 @@ print_info "Step 7: Optional shell aliases..."
 echo ""
 echo "Add these aliases to your ~/.bashrc or ~/.zshrc for easier worktree management:"
 echo ""
-cat << 'EOF'
+cat << EOF
 # ripVID Worktree Aliases
-alias ripvid='cd /home/user/ripVID'
-alias ripwork='cd /home/user/ripVID-worktrees'
+alias ripvid='cd $REPO_DIR'
+alias ripwork='cd $WORKTREES_DIR'
 alias gwl='git worktree list'
 alias gwr='git worktree remove'
 alias gwp='git worktree prune'
 
 # Create new worktree with setup
 ripnew() {
-    local branch_name=$1
-    local worktree_name=${2:-$branch_name}
-    cd /home/user/ripVID
-    git worktree add -b "$branch_name" "/home/user/ripVID-worktrees/$worktree_name"
-    cd "/home/user/ripVID-worktrees/$worktree_name"
-    npm install
-    echo "Ready! Run 'npm run tauri:dev' to start."
+    local branch_name=\$1
+    local worktree_name=\${2:-\$branch_name}
+    cd "$REPO_DIR"
+    git worktree add -b "\$branch_name" "$WORKTREES_DIR/\$worktree_name"
+    cd "$WORKTREES_DIR/\$worktree_name"
+    $PKG_MANAGER install
+    echo "Ready! Run '$PKG_MANAGER run tauri:dev' to start."
 }
 EOF
 echo ""
@@ -243,7 +260,7 @@ print_info "Next steps:"
 echo ""
 echo "  1. Start working in your worktree:"
 echo "     cd $WORKTREE_PATH"
-echo "     npm run tauri:dev"
+echo "     $PKG_MANAGER run tauri:dev"
 echo ""
 echo "  2. When ready, switch main directory to main branch:"
 echo "     cd $REPO_DIR"

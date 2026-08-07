@@ -263,9 +263,11 @@ fn build_ytdlp_args(
     let mut args = vec![
         url.to_string(),
         "--no-playlist".to_string(),
-        // Use Bun JS runtime for YouTube extraction (already installed for build system)
+        // Enable the Deno JS runtime for YouTube extraction (required since yt-dlp 2025+).
+        // Deno is auto-downloaded by BinaryManager and its directory is injected into PATH
+        // below, so it is available even when the end user has no system JS runtime.
         "--js-runtimes".to_string(),
-        "bun".to_string(),
+        "deno".to_string(),
     ];
 
     // Add ffmpeg location - try bundled first, then system ffmpeg
@@ -418,13 +420,36 @@ pub async fn download_content(
     // Get yt-dlp path from binary manager
     let ytdlp_path = binary_manager.get_binary_path("yt-dlp").ok();
 
-    // Spawn yt-dlp process (Bun is used as JS runtime, already in system PATH)
+    // Get the binaries directory (where the Deno JS runtime lives) to add to PATH.
+    // yt-dlp discovers the runtime via PATH, and GUI-launched apps (especially on
+    // macOS) do not inherit the user's shell PATH, so this must be set explicitly.
+    let binaries_dir = binary_manager
+        .get_binary_path("deno")
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+    // Build modified PATH with our binaries directory prepended
+    let modified_path = if let Some(ref bin_dir) = binaries_dir {
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let bin_dir_str = bin_dir.to_string_lossy();
+        #[cfg(target_os = "windows")]
+        let new_path = format!("{};{}", bin_dir_str, current_path);
+        #[cfg(not(target_os = "windows"))]
+        let new_path = format!("{}:{}", bin_dir_str, current_path);
+        info!("✓ Added bundled binaries to PATH: {}", bin_dir_str);
+        new_path
+    } else {
+        std::env::var("PATH").unwrap_or_default()
+    };
+
+    // Spawn yt-dlp process (Deno JS runtime resolved via the modified PATH)
     let (mut rx, child) = if let Some(path) = ytdlp_path {
         if path.exists() {
             info!("Using downloaded yt-dlp from: {:?}", path);
             app.shell()
                 .command(path)
                 .args(&args)
+                .env("PATH", &modified_path)
                 .spawn()
                 .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
         } else {
@@ -433,6 +458,7 @@ pub async fn download_content(
                 .sidecar("yt-dlp")
                 .map_err(|e| DownloadError::Sidecar(e.to_string()))?
                 .args(&args)
+                .env("PATH", &modified_path)
                 .spawn()
                 .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
         }
@@ -442,6 +468,7 @@ pub async fn download_content(
             .sidecar("yt-dlp")
             .map_err(|e| DownloadError::Sidecar(e.to_string()))?
             .args(&args)
+            .env("PATH", &modified_path)
             .spawn()
             .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
     };
