@@ -805,3 +805,134 @@ pub async fn cancel_download(
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_quality_format_known_qualities() {
+        assert_eq!(
+            get_quality_format("best"),
+            "bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+        );
+        assert!(get_quality_format("1080p").contains("height<=1080"));
+        assert!(get_quality_format("720p").contains("height<=720"));
+        assert!(get_quality_format("480p").contains("height<=480"));
+        assert!(get_quality_format("360p").contains("height<=360"));
+    }
+
+    #[test]
+    fn test_get_quality_format_accepts_bare_numbers_and_any_case() {
+        assert_eq!(get_quality_format("1080"), get_quality_format("1080p"));
+        assert_eq!(get_quality_format("720"), get_quality_format("720p"));
+        assert_eq!(get_quality_format("480"), get_quality_format("480p"));
+        assert_eq!(get_quality_format("360"), get_quality_format("360p"));
+        assert_eq!(get_quality_format("BEST"), get_quality_format("best"));
+        assert_eq!(get_quality_format("1080P"), get_quality_format("1080p"));
+    }
+
+    #[test]
+    fn test_get_quality_format_unknown_falls_back_to_best() {
+        assert_eq!(get_quality_format("4k"), get_quality_format("best"));
+        assert_eq!(get_quality_format(""), get_quality_format("best"));
+    }
+
+    #[test]
+    fn test_get_quality_format_always_requests_mp4() {
+        for quality in ["best", "1080p", "720p", "480p", "360p", "unknown"] {
+            assert!(
+                get_quality_format(quality).contains("ext=mp4"),
+                "quality {} should request mp4",
+                quality
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_progress_full_line() {
+        let progress =
+            parse_progress("[download]  42.5% of 10.00MiB at 1.23MiB/s ETA 00:07").unwrap();
+        assert_eq!(progress.percent, 42.5);
+        assert_eq!(progress.speed, "1.23MiB/s");
+        assert_eq!(progress.eta, "00:07");
+    }
+
+    #[test]
+    fn test_parse_progress_integer_percent() {
+        let progress = parse_progress("[download] 100% of 10.00MiB in 00:05").unwrap();
+        assert_eq!(progress.percent, 100.0);
+    }
+
+    #[test]
+    fn test_parse_progress_missing_speed_and_eta() {
+        let progress = parse_progress("[download]   0.0% of ~10.00MiB").unwrap();
+        assert_eq!(progress.percent, 0.0);
+        assert_eq!(progress.speed, "---");
+        assert_eq!(progress.eta, "--:--");
+    }
+
+    #[test]
+    fn test_parse_progress_ignores_non_progress_lines() {
+        assert!(parse_progress("").is_none());
+        assert!(parse_progress("[download] Destination: video.mp4").is_none());
+        assert!(parse_progress("[Merger] Merging formats into \"video.mp4\"").is_none());
+        // A percentage without the [download] prefix is not progress output
+        assert!(parse_progress("50% complete").is_none());
+    }
+
+    #[test]
+    fn test_browser_config_without_cookies_has_no_browser() {
+        let config = BrowserConfig::new(false);
+        assert!(!config.use_cookies);
+        assert!(config.browser.is_none());
+    }
+
+    #[test]
+    fn test_is_browser_installed_rejects_unknown_browser() {
+        assert!(!is_browser_installed("definitely-not-a-real-browser"));
+    }
+
+    #[test]
+    fn test_download_type_serialization_is_tagged() {
+        let video = serde_json::to_value(DownloadType::Video {
+            quality: "1080p".to_string(),
+        })
+        .unwrap();
+        assert_eq!(video["type"], "Video");
+        assert_eq!(video["quality"], "1080p");
+
+        let audio = serde_json::to_value(DownloadType::Audio).unwrap();
+        assert_eq!(audio["type"], "Audio");
+    }
+
+    #[test]
+    fn test_download_progress_serialization() {
+        let progress = DownloadProgress {
+            percent: 12.5,
+            speed: "1.00MiB/s".to_string(),
+            eta: "00:30".to_string(),
+        };
+        let json = serde_json::to_value(&progress).unwrap();
+        assert_eq!(json["percent"], 12.5);
+        assert_eq!(json["speed"], "1.00MiB/s");
+        assert_eq!(json["eta"], "00:30");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_strip_extended_path_prefix_is_identity_on_unix() {
+        let path = std::path::Path::new("/home/user/ripVID/MP4");
+        assert_eq!(strip_extended_path_prefix(path), "/home/user/ripVID/MP4");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_strip_extended_path_prefix_removes_verbatim_prefix() {
+        let path = std::path::Path::new(r"\\?\C:\Users\test\ripVID");
+        assert_eq!(strip_extended_path_prefix(path), "C:/Users/test/ripVID");
+
+        let plain = std::path::Path::new(r"C:\Users\test\ripVID");
+        assert_eq!(strip_extended_path_prefix(plain), "C:/Users/test/ripVID");
+    }
+}

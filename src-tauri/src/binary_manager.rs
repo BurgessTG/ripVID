@@ -209,13 +209,7 @@ impl BinaryManager {
 
     /// Get the path for a binary (platform-aware)
     pub fn get_binary_path(&self, name: &str) -> Result<PathBuf, String> {
-        let filename = if cfg!(windows) {
-            format!("{}.exe", name)
-        } else {
-            name.to_string()
-        };
-
-        Ok(self.data_dir.join(filename))
+        Ok(self.data_dir.join(binary_filename(name)))
     }
 
     /// Get the current version of a binary from saved info
@@ -283,7 +277,7 @@ impl BinaryManager {
             .fetch_and_parse_checksum(&client, &checksums_url, asset_name)
             .await?;
 
-        let actual_checksum = self.calculate_sha256(&bytes);
+        let actual_checksum = calculate_sha256(&bytes);
 
         if actual_checksum.to_lowercase() != expected_checksum.to_lowercase() {
             return Err(format!(
@@ -404,9 +398,9 @@ impl BinaryManager {
         // Handle archive extraction based on type
         let final_bytes = match source.archive_type {
             ArchiveType::None => bytes.to_vec(),
-            ArchiveType::Zip => self.extract_from_zip(&bytes, binary_name)?,
-            ArchiveType::TarXz => self.extract_from_tar_xz(&bytes, binary_name)?,
-            ArchiveType::TarGz => self.extract_from_tar_gz(&bytes, binary_name)?,
+            ArchiveType::Zip => extract_from_zip(&bytes, binary_name)?,
+            ArchiveType::TarXz => extract_from_tar_xz(&bytes, binary_name)?,
+            ArchiveType::TarGz => extract_from_tar_gz(&bytes, binary_name)?,
         };
 
         // Save binary
@@ -426,130 +420,6 @@ impl BinaryManager {
         self.save_binary_info(binary_name, &source.version, &path)?;
 
         Ok(())
-    }
-
-    /// Extract a binary from a ZIP archive
-    fn extract_from_zip(&self, bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
-        use std::io::Cursor;
-        use zip::ZipArchive;
-
-        let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor).map_err(|e| format!("Invalid zip: {}", e))?;
-
-        // Determine target filename based on platform
-        let target_name = if cfg!(windows) {
-            format!("{}.exe", binary_name)
-        } else {
-            binary_name.to_string()
-        };
-
-        // Look for the binary in the zip (may be in subdirectory)
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-            let file_name = file.name().to_string();
-
-            // Check if this file matches our target (handle nested paths)
-            let is_match = file_name.ends_with(&target_name)
-                || file_name.ends_with(&format!("/{}", target_name))
-                || file_name.ends_with(&format!("\\{}", target_name));
-
-            if is_match && !file.is_dir() {
-                let mut buffer = Vec::new();
-                io::copy(&mut file, &mut buffer).map_err(|e| e.to_string())?;
-                info!("Extracted {} from zip ({})", binary_name, file_name);
-                return Ok(buffer);
-            }
-        }
-
-        Err(format!("{} not found in zip archive", target_name))
-    }
-
-    /// Extract a binary from a tar.xz archive (Linux)
-    fn extract_from_tar_xz(&self, bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
-        use std::io::Cursor;
-        use xz2::read::XzDecoder;
-        use tar::Archive;
-
-        info!("Extracting {} from tar.xz archive...", binary_name);
-
-        // Decompress XZ
-        let cursor = Cursor::new(bytes);
-        let xz_decoder = XzDecoder::new(cursor);
-
-        // Open TAR archive
-        let mut archive = Archive::new(xz_decoder);
-
-        // Look for the binary in the archive
-        let entries = archive.entries().map_err(|e| format!("Failed to read tar entries: {}", e))?;
-
-        for entry_result in entries {
-            let mut entry = entry_result.map_err(|e| format!("Failed to read entry: {}", e))?;
-            let path_str = {
-                let path = entry.path().map_err(|e| format!("Failed to get path: {}", e))?;
-                path.to_string_lossy().to_string()
-            };
-
-            // Check if this is the binary we want
-            // ffmpeg archives typically have structure like: ffmpeg-6.0-amd64-static/ffmpeg
-            // IMPORTANT: Use exact match to avoid ffprobe matching when looking for ffmpeg
-            let filename = std::path::Path::new(&path_str)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let is_match = filename == binary_name;
-
-            if is_match && entry.header().entry_type().is_file() {
-                let mut buffer = Vec::new();
-                entry.read_to_end(&mut buffer).map_err(|e| format!("Failed to read entry: {}", e))?;
-                info!("Extracted {} from tar.xz ({})", binary_name, path_str);
-                return Ok(buffer);
-            }
-        }
-
-        Err(format!("{} not found in tar.xz archive", binary_name))
-    }
-
-    /// Extract a binary from a tar.gz archive (fallback)
-    fn extract_from_tar_gz(&self, bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
-        use std::io::Cursor;
-        use flate2::read::GzDecoder;
-        use tar::Archive;
-
-        info!("Extracting {} from tar.gz archive...", binary_name);
-
-        // Decompress Gzip
-        let cursor = Cursor::new(bytes);
-        let gz_decoder = GzDecoder::new(cursor);
-
-        // Open TAR archive
-        let mut archive = Archive::new(gz_decoder);
-
-        // Look for the binary
-        let entries = archive.entries().map_err(|e| format!("Failed to read tar entries: {}", e))?;
-
-        for entry_result in entries {
-            let mut entry = entry_result.map_err(|e| format!("Failed to read entry: {}", e))?;
-            let path_str = {
-                let path = entry.path().map_err(|e| format!("Failed to get path: {}", e))?;
-                path.to_string_lossy().to_string()
-            };
-
-            // Use exact filename match to avoid mismatches
-            let filename = std::path::Path::new(&path_str)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let is_match = filename == binary_name;
-
-            if is_match && entry.header().entry_type().is_file() {
-                let mut buffer = Vec::new();
-                entry.read_to_end(&mut buffer).map_err(|e| format!("Failed to read entry: {}", e))?;
-                info!("Extracted {} from tar.gz ({})", binary_name, path_str);
-                return Ok(buffer);
-            }
-        }
-
-        Err(format!("{} not found in tar.gz archive", binary_name))
     }
 
     fn get_ytdlp_asset_name(&self) -> &str {
@@ -711,7 +581,7 @@ impl BinaryManager {
         );
 
         if let Ok(expected_checksum) = self.fetch_and_parse_checksum(&client, &checksums_url, asset_name).await {
-            let actual_checksum = self.calculate_sha256(&bytes);
+            let actual_checksum = calculate_sha256(&bytes);
             if actual_checksum.to_lowercase() != expected_checksum.to_lowercase() {
                 return Err(format!(
                     "Checksum mismatch! Expected: {}, Got: {}",
@@ -814,13 +684,6 @@ impl BinaryManager {
         Ok(())
     }
 
-    fn calculate_sha256(&self, data: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let result = hasher.finalize();
-        hex::encode(result)
-    }
-
     async fn fetch_and_parse_checksum(
         &self,
         client: &reqwest::Client,
@@ -846,19 +709,7 @@ impl BinaryManager {
             .await
             .map_err(|e| format!("Failed to read checksum file: {}", e))?;
 
-        for line in checksums_text.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let hash = parts[0];
-                let filename = parts[1];
-
-                if filename == asset_name {
-                    return Ok(hash.to_string());
-                }
-            }
-        }
-
-        Err(format!("Checksum not found for {}", asset_name))
+        parse_checksum(&checksums_text, asset_name)
     }
 
     fn emit_progress(&self, binary: &str, progress: f64, status: &str) -> Result<(), String> {
@@ -880,6 +731,140 @@ impl BinaryManager {
     }
 }
 
+/// Platform-aware on-disk filename for a binary
+fn binary_filename(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{}.exe", name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn calculate_sha256(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    hex::encode(result)
+}
+
+/// Look up the checksum for an asset in a `sha256sum`-style checksum file
+fn parse_checksum(checksums_text: &str, asset_name: &str) -> Result<String, String> {
+    for line in checksums_text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let hash = parts[0];
+            let filename = parts[1];
+
+            if filename == asset_name {
+                return Ok(hash.to_string());
+            }
+        }
+    }
+
+    Err(format!("Checksum not found for {}", asset_name))
+}
+
+/// Extract a binary from a ZIP archive
+fn extract_from_zip(bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
+    use std::io::Cursor;
+    use zip::ZipArchive;
+
+    let cursor = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor).map_err(|e| format!("Invalid zip: {}", e))?;
+
+    let target_name = binary_filename(binary_name);
+
+    // Look for the binary in the zip (may be in subdirectory)
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+        let file_name = file.name().to_string();
+
+        // Check if this file matches our target (handle nested paths)
+        let is_match = file_name.ends_with(&target_name)
+            || file_name.ends_with(&format!("/{}", target_name))
+            || file_name.ends_with(&format!("\\{}", target_name));
+
+        if is_match && !file.is_dir() {
+            let mut buffer = Vec::new();
+            io::copy(&mut file, &mut buffer).map_err(|e| e.to_string())?;
+            info!("Extracted {} from zip ({})", binary_name, file_name);
+            return Ok(buffer);
+        }
+    }
+
+    Err(format!("{} not found in zip archive", target_name))
+}
+
+/// Extract a binary from a tar archive read through `reader`
+fn extract_from_tar<R: Read>(
+    reader: R,
+    binary_name: &str,
+    archive_label: &str,
+) -> Result<Vec<u8>, String> {
+    use tar::Archive;
+
+    info!(
+        "Extracting {} from {} archive...",
+        binary_name, archive_label
+    );
+
+    let mut archive = Archive::new(reader);
+
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("Failed to read tar entries: {}", e))?;
+
+    for entry_result in entries {
+        let mut entry = entry_result.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path_str = {
+            let path = entry
+                .path()
+                .map_err(|e| format!("Failed to get path: {}", e))?;
+            path.to_string_lossy().to_string()
+        };
+
+        // Archives are typically nested, e.g. ffmpeg-6.0-amd64-static/ffmpeg.
+        // IMPORTANT: Use exact match to avoid ffprobe matching when looking for ffmpeg
+        let filename = std::path::Path::new(&path_str)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if filename == binary_name && entry.header().entry_type().is_file() {
+            let mut buffer = Vec::new();
+            entry
+                .read_to_end(&mut buffer)
+                .map_err(|e| format!("Failed to read entry: {}", e))?;
+            info!(
+                "Extracted {} from {} ({})",
+                binary_name, archive_label, path_str
+            );
+            return Ok(buffer);
+        }
+    }
+
+    Err(format!(
+        "{} not found in {} archive",
+        binary_name, archive_label
+    ))
+}
+
+/// Extract a binary from a tar.xz archive (Linux)
+fn extract_from_tar_xz(bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
+    use std::io::Cursor;
+    use xz2::read::XzDecoder;
+
+    extract_from_tar(XzDecoder::new(Cursor::new(bytes)), binary_name, "tar.xz")
+}
+
+/// Extract a binary from a tar.gz archive (fallback)
+fn extract_from_tar_gz(bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
+    use flate2::read::GzDecoder;
+    use std::io::Cursor;
+
+    extract_from_tar(GzDecoder::new(Cursor::new(bytes)), binary_name, "tar.gz")
+}
+
 /// Type of archive for extraction
 #[derive(Debug, Clone)]
 enum ArchiveType {
@@ -895,4 +880,246 @@ struct DownloadSource {
     url: String,
     version: String,
     archive_type: ArchiveType,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        for (name, contents) in entries {
+            if name.ends_with('/') {
+                writer.add_directory(*name, options).unwrap();
+            } else {
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(contents).unwrap();
+            }
+        }
+
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn build_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+
+        for (name, contents) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, name, *contents).unwrap();
+        }
+
+        builder.into_inner().unwrap()
+    }
+
+    fn build_tar_xz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 1);
+        encoder.write_all(&build_tar(entries)).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn build_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&build_tar(entries)).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn test_binary_filename_is_platform_aware() {
+        let expected = if cfg!(windows) {
+            "yt-dlp.exe"
+        } else {
+            "yt-dlp"
+        };
+        assert_eq!(binary_filename("yt-dlp"), expected);
+    }
+
+    #[test]
+    fn test_calculate_sha256_matches_known_digest() {
+        assert_eq!(
+            calculate_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            calculate_sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_calculate_sha256_is_lowercase_hex() {
+        let digest = calculate_sha256(b"ripVID");
+        assert_eq!(digest.len(), 64);
+        assert!(digest
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    }
+
+    #[test]
+    fn test_parse_checksum_finds_matching_asset() {
+        let checksums = "\
+aaaa1111  yt-dlp.exe
+bbbb2222  yt-dlp_linux
+cccc3333  yt-dlp_macos
+";
+        assert_eq!(
+            parse_checksum(checksums, "yt-dlp_linux").unwrap(),
+            "bbbb2222"
+        );
+        assert_eq!(parse_checksum(checksums, "yt-dlp.exe").unwrap(), "aaaa1111");
+    }
+
+    #[test]
+    fn test_parse_checksum_requires_exact_filename_match() {
+        let checksums = "aaaa1111  yt-dlp_linux\n";
+        // "yt-dlp" is a prefix of "yt-dlp_linux" but must not match
+        assert!(parse_checksum(checksums, "yt-dlp").is_err());
+    }
+
+    #[test]
+    fn test_parse_checksum_skips_malformed_lines() {
+        let checksums = "\
+# comment line
+
+onlyonefield
+dddd4444  yt-dlp_linux
+";
+        assert_eq!(
+            parse_checksum(checksums, "yt-dlp_linux").unwrap(),
+            "dddd4444"
+        );
+    }
+
+    #[test]
+    fn test_parse_checksum_missing_asset_errors() {
+        let error = parse_checksum("aaaa1111  other\n", "yt-dlp_linux").unwrap_err();
+        assert!(error.contains("yt-dlp_linux"));
+        assert!(parse_checksum("", "yt-dlp_linux").is_err());
+    }
+
+    #[test]
+    fn test_extract_from_zip_finds_nested_binary() {
+        let name = binary_filename("ffmpeg");
+        let nested = format!("ffmpeg-6.0-essentials_build/bin/{}", name);
+        let zip = build_zip(&[("readme.txt", b"docs"), (nested.as_str(), b"BINARY")]);
+
+        assert_eq!(extract_from_zip(&zip, "ffmpeg").unwrap(), b"BINARY");
+    }
+
+    #[test]
+    fn test_extract_from_zip_skips_directory_entries() {
+        let name = binary_filename("ffmpeg");
+        let dir = format!("{}/", name);
+        let zip = build_zip(&[(dir.as_str(), b""), (name.as_str(), b"BINARY")]);
+
+        assert_eq!(extract_from_zip(&zip, "ffmpeg").unwrap(), b"BINARY");
+    }
+
+    #[test]
+    fn test_extract_from_zip_missing_binary_errors() {
+        let zip = build_zip(&[("readme.txt", b"docs")]);
+        let error = extract_from_zip(&zip, "ffmpeg").unwrap_err();
+        assert!(error.contains("not found in zip archive"));
+    }
+
+    #[test]
+    fn test_extract_from_zip_rejects_invalid_archive() {
+        let error = extract_from_zip(b"not a zip file", "ffmpeg").unwrap_err();
+        assert!(error.contains("Invalid zip"));
+    }
+
+    #[test]
+    fn test_extract_from_tar_xz_finds_nested_binary() {
+        let archive = build_tar_xz(&[
+            ("ffmpeg-release-amd64-static/README", b"docs"),
+            ("ffmpeg-release-amd64-static/ffmpeg", b"FFMPEG"),
+        ]);
+
+        assert_eq!(extract_from_tar_xz(&archive, "ffmpeg").unwrap(), b"FFMPEG");
+    }
+
+    #[test]
+    fn test_extract_from_tar_xz_does_not_confuse_ffprobe_with_ffmpeg() {
+        let archive = build_tar_xz(&[
+            ("ffmpeg-release-amd64-static/ffprobe", b"FFPROBE"),
+            ("ffmpeg-release-amd64-static/ffmpeg", b"FFMPEG"),
+        ]);
+
+        assert_eq!(extract_from_tar_xz(&archive, "ffmpeg").unwrap(), b"FFMPEG");
+        assert_eq!(
+            extract_from_tar_xz(&archive, "ffprobe").unwrap(),
+            b"FFPROBE"
+        );
+    }
+
+    #[test]
+    fn test_extract_from_tar_xz_missing_binary_errors() {
+        let archive = build_tar_xz(&[("ffmpeg-release-amd64-static/README", b"docs")]);
+        let error = extract_from_tar_xz(&archive, "ffmpeg").unwrap_err();
+        assert!(error.contains("not found in tar.xz archive"));
+    }
+
+    #[test]
+    fn test_extract_from_tar_gz_finds_nested_binary() {
+        let archive = build_tar_gz(&[
+            ("ffmpeg-release-amd64-static/README", b"docs"),
+            ("ffmpeg-release-amd64-static/ffprobe", b"FFPROBE"),
+        ]);
+
+        assert_eq!(
+            extract_from_tar_gz(&archive, "ffprobe").unwrap(),
+            b"FFPROBE"
+        );
+    }
+
+    #[test]
+    fn test_extract_from_tar_gz_missing_binary_errors() {
+        let archive = build_tar_gz(&[("ffmpeg-release-amd64-static/README", b"docs")]);
+        let error = extract_from_tar_gz(&archive, "ffmpeg").unwrap_err();
+        assert!(error.contains("not found in tar.gz archive"));
+    }
+
+    #[test]
+    fn test_extract_from_tar_rejects_corrupt_archive() {
+        assert!(extract_from_tar_xz(b"not an xz archive", "ffmpeg").is_err());
+        assert!(extract_from_tar_gz(b"not a gz archive", "ffmpeg").is_err());
+    }
+
+    #[test]
+    fn test_binary_info_round_trips_through_json() {
+        let info = BinaryInfo {
+            name: "yt-dlp".to_string(),
+            version: "2024.01.01".to_string(),
+            last_check: 1_700_000_000,
+            path: "/home/user/.local/share/ripvid/binaries/yt-dlp".to_string(),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: BinaryInfo = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.name, info.name);
+        assert_eq!(parsed.version, info.version);
+        assert_eq!(parsed.last_check, info.last_check);
+        assert_eq!(parsed.path, info.path);
+    }
+
+    #[test]
+    fn test_download_progress_serializes_to_camel_case() {
+        let json = serde_json::to_value(DownloadProgress {
+            binary: "ffmpeg".to_string(),
+            progress: 75.0,
+            status: "Extracting binary...".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(json["binary"], "ffmpeg");
+        assert_eq!(json["progress"], 75.0);
+        assert_eq!(json["status"], "Extracting binary...");
+    }
 }

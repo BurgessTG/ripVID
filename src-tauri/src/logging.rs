@@ -65,3 +65,35 @@ pub fn init_logging(app_data_dir: PathBuf) -> Result<(), Box<dyn std::error::Err
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `init_logging` installs a process-global subscriber, so it can only be
+    /// exercised once per test binary.
+    #[test]
+    fn test_init_logging_creates_logs_directory_and_writes_a_log_file() {
+        let app_data_dir =
+            std::env::temp_dir().join(format!("ripvid-logging-{}", std::process::id()));
+
+        init_logging(app_data_dir.clone()).unwrap();
+
+        let logs_dir = app_data_dir.join("logs");
+        assert!(logs_dir.is_dir());
+
+        tracing::info!("test log line");
+
+        let log_files: Vec<_> = std::fs::read_dir(&logs_dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("ripvid.log")
+            })
+            .collect();
+        assert!(!log_files.is_empty(), "expected a rolling log file");
+    }
+}
