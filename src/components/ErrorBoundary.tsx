@@ -131,7 +131,7 @@ class ErrorBoundary extends Component<Props, State> {
                         <p className="error-help">
                             If this problem persists, please{" "}
                             <a
-                                href="https://github.com/BurgessTG/ripVID/issues"
+                                href="https://github.com/honeycomb-Technologies/ripVID/issues"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="error-link"

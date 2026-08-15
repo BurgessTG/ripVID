@@ -34,6 +34,30 @@ interface DownloadStarted {
     path: string;
 }
 
+interface BinarySetupProgress {
+    binary: string;
+    progress: number;
+    status: string;
+}
+
+const ARCHIVE_STORAGE_KEY = "ripvid-archive";
+
+function toErrorMessage(error: unknown): string {
+    if (typeof error === "string") return error;
+    if (error instanceof Error) return error.message;
+    return String(error);
+}
+
+function persistArchive(items: ArchiveItem[]): string | null {
+    try {
+        localStorage.setItem(ARCHIVE_STORAGE_KEY, JSON.stringify(items));
+        return null;
+    } catch (error) {
+        console.error("Failed to save archive:", error);
+        return toErrorMessage(error);
+    }
+}
+
 interface ArchiveItem {
     id: string;
     title: string;
@@ -70,6 +94,9 @@ function App() {
         null,
     );
     const [showSettings, setShowSettings] = useState(false);
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const [binarySetup, setBinarySetup] = useState<BinarySetupProgress | null>(null);
+    const [binarySetupError, setBinarySetupError] = useState<string | null>(null);
     const [processingMessage, setProcessingMessage] = useState<string>("Processing...");
     const [processingStartTime, setProcessingStartTime] = useState<number | null>(null);
     const [processingElapsed, setProcessingElapsed] = useState<number>(0);
@@ -113,6 +140,25 @@ function App() {
             console.log("Status message:", event.payload);
         });
 
+        const binaryProgressUnsubscribe = listen<BinarySetupProgress>(
+            "binary-download-progress",
+            (event) => {
+                setBinarySetup(event.payload);
+                if (event.payload.progress >= 100 && event.payload.binary === "setup") {
+                    setBinarySetupError(null);
+                    setBinarySetup(null);
+                }
+            },
+        );
+
+        const binaryErrorUnsubscribe = listen<string>(
+            "binary-setup-error",
+            (event) => {
+                setBinarySetupError(event.payload);
+                setBinarySetup(null);
+            },
+        );
+
         // Listen for download processing (ffmpeg merge or audio extraction)
         const processingUnsubscribe = listen<{
             message: string;
@@ -135,6 +181,10 @@ function App() {
             error?: string;
         }>("download-complete", async (event) => {
             console.log("Download complete:", event.payload);
+
+            if (!event.payload.success) {
+                setErrorMessage(event.payload.error ?? "Download failed");
+            }
 
             if (
                 event.payload.success &&
@@ -175,10 +225,10 @@ function App() {
 
                         setArchive(prevArchive => {
                             const newArchive = [newItem, ...prevArchive];
-                            localStorage.setItem(
-                                "ripvid-archive",
-                                JSON.stringify(newArchive),
-                            );
+                            const saveError = persistArchive(newArchive);
+                            if (saveError) {
+                                setErrorMessage(`Download saved, but history could not be stored: ${saveError}`);
+                            }
                             console.log("Added to archive:", newItem);
                             return newArchive;
                         });
@@ -187,9 +237,11 @@ function App() {
                             "File not found after download:",
                             event.payload.path,
                         );
+                        setErrorMessage("Download reported success, but the file was not found on disk");
                     }
                 } catch (error) {
                     console.error("Failed to verify file:", error);
+                    setErrorMessage(`Could not verify the downloaded file: ${toErrorMessage(error)}`);
                 }
             }
 
@@ -212,12 +264,20 @@ function App() {
         );
 
         return () => {
-            progressUnsubscribe.then((fn) => fn());
-            startedUnsubscribe.then((fn) => fn());
-            statusUnsubscribe.then((fn) => fn());
-            processingUnsubscribe.then((fn) => fn());
-            completeUnsubscribe.then((fn) => fn());
-            cancelledUnsubscribe.then((fn) => fn());
+            for (const unsubscribe of [
+                progressUnsubscribe,
+                startedUnsubscribe,
+                statusUnsubscribe,
+                binaryProgressUnsubscribe,
+                binaryErrorUnsubscribe,
+                processingUnsubscribe,
+                completeUnsubscribe,
+                cancelledUnsubscribe,
+            ]) {
+                unsubscribe.then((fn) => fn()).catch((error) => {
+                    console.error("Failed to remove event listener:", error);
+                });
+            }
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []); // Empty deps - listeners should only be set up once on mount
@@ -225,26 +285,29 @@ function App() {
     useEffect(() => {
         // Initialize app and check first launch
         const initializeApp = async () => {
-            // Check if terms have been accepted
-            const termsAccepted = localStorage.getItem("ripvid-terms-accepted");
-            if (!termsAccepted) {
-                setShowTerms(true);
-            } else {
-                // Ensure folder structure exists
-                await setupFolderStructure();
-            }
+            try {
+                const termsAccepted = localStorage.getItem("ripvid-terms-accepted");
+                if (!termsAccepted) {
+                    setShowTerms(true);
+                } else {
+                    await setupFolderStructure();
+                }
 
-            // Show window once app is ready
-            const appWindow = getCurrentWebviewWindow();
-            await appWindow.show();
-
-            // Load archive from localStorage
-            const saved = localStorage.getItem("ripvid-archive");
-            if (saved) {
-                const loadedArchive = JSON.parse(saved);
-                setArchive(loadedArchive);
-                // Verify files exist in background
-                verifyArchiveFiles(loadedArchive);
+                const saved = localStorage.getItem(ARCHIVE_STORAGE_KEY);
+                if (saved) {
+                    const loadedArchive = JSON.parse(saved) as ArchiveItem[];
+                    if (!Array.isArray(loadedArchive)) {
+                        throw new Error("Saved archive is not a list");
+                    }
+                    setArchive(loadedArchive);
+                    await verifyArchiveFiles(loadedArchive);
+                }
+            } catch (error) {
+                console.error("Failed to initialize app:", error);
+                setErrorMessage(`Failed to initialize app: ${toErrorMessage(error)}`);
+            } finally {
+                // A bootstrap failure must not leave the window permanently hidden.
+                await getCurrentWebviewWindow().show();
             }
             // Load format preference
             const savedFormat = localStorage.getItem("ripvid-format");
@@ -258,7 +321,10 @@ function App() {
             }
         };
 
-        initializeApp();
+        initializeApp().catch((error) => {
+            console.error("Unhandled initialization failure:", error);
+            setErrorMessage(toErrorMessage(error));
+        });
     }, []);
 
     useEffect(() => {
@@ -297,6 +363,7 @@ function App() {
             const timer = setTimeout(() => {
                 setStatus("idle");
                 setProgress(null);
+                setErrorMessage(null);
                 setUrl("");
                 setProcessingStartTime(null);
                 setProcessingElapsed(0);
@@ -307,6 +374,12 @@ function App() {
             return () => clearTimeout(timer);
         }
     }, [status]);
+
+    useEffect(() => {
+        if (!errorMessage || status !== "idle") return;
+        const timer = setTimeout(() => setErrorMessage(null), 8000);
+        return () => clearTimeout(timer);
+    }, [errorMessage, status]);
 
     // Update elapsed time during processing phase
     useEffect(() => {
@@ -373,6 +446,7 @@ function App() {
         setIsDownloading(true);
         setStatus("downloading");
         setProgress(null);
+        setErrorMessage(null);
 
         // Store download info for later use in completion handler
         downloadInfoRef.current = {
@@ -406,10 +480,22 @@ function App() {
             // The actual completion and archive addition will be handled by the download-complete event
         } catch (error) {
             console.error("Failed to start download:", error);
+            setErrorMessage(toErrorMessage(error));
             setStatus("error");
             setIsDownloading(false);
             setCurrentDownloadId(null);
             downloadInfoRef.current = null;
+        }
+    };
+
+    const handleRetrySetup = async () => {
+        setBinarySetupError(null);
+        setBinarySetup({ binary: "setup", progress: 0, status: "Retrying setup..." });
+        try {
+            await invoke("retry_binary_setup");
+        } catch (error) {
+            setBinarySetup(null);
+            setBinarySetupError(toErrorMessage(error));
         }
     };
 
@@ -425,6 +511,9 @@ function App() {
             console.log("Download cancelled successfully");
         } catch (error) {
             console.error("Failed to cancel download:", error);
+            setErrorMessage(`Failed to cancel download: ${toErrorMessage(error)}`);
+            setStatus("error");
+            setIsDownloading(false);
         }
     };
 
@@ -449,6 +538,7 @@ function App() {
         // Don't attempt to open if we know the file doesn't exist
         if (fileExists === false) {
             console.warn("Cannot open file - file does not exist:", path);
+            setErrorMessage("File no longer exists on disk");
             return;
         }
 
@@ -462,6 +552,7 @@ function App() {
                 await invoke("open_file_location", { path });
             } catch (fallbackError) {
                 console.error("Fallback to folder also failed:", fallbackError);
+                setErrorMessage(`Could not open file: ${toErrorMessage(error)} (${toErrorMessage(fallbackError)})`);
             }
         }
     };
@@ -477,13 +568,16 @@ function App() {
             // Remove from archive
             const newArchive = archive.filter((item) => item.id !== id);
             setArchive(newArchive);
-            localStorage.setItem("ripvid-archive", JSON.stringify(newArchive));
+            const saveError = persistArchive(newArchive);
+            if (saveError) setErrorMessage(`Failed to update history: ${saveError}`);
         } catch (error) {
             console.error("Failed to recycle file:", error);
+            setErrorMessage(`Removed from history, but the file could not be recycled: ${toErrorMessage(error)}`);
             // Still remove from archive even if file recycling fails
             const newArchive = archive.filter((item) => item.id !== id);
             setArchive(newArchive);
-            localStorage.setItem("ripvid-archive", JSON.stringify(newArchive));
+            const saveError = persistArchive(newArchive);
+            if (saveError) setErrorMessage(`Failed to update history: ${saveError}`);
         }
     };
 
@@ -502,6 +596,7 @@ function App() {
             console.log("Folder structure created successfully");
         } catch (error) {
             console.error("Failed to create folder structure:", error);
+            setErrorMessage(`Could not create the ripVID download folders: ${toErrorMessage(error)}`);
         }
     };
 
@@ -522,7 +617,8 @@ function App() {
         );
 
         setArchive(updatedArchive);
-        localStorage.setItem("ripvid-archive", JSON.stringify(updatedArchive));
+        const saveError = persistArchive(updatedArchive);
+        if (saveError) setErrorMessage(`Failed to update history: ${saveError}`);
     };
 
     // Refresh archive by scanning actual download folders
@@ -561,10 +657,8 @@ function App() {
             if (newItems.length > 0) {
                 const mergedArchive = [...archive, ...newItems];
                 setArchive(mergedArchive);
-                localStorage.setItem(
-                    "ripvid-archive",
-                    JSON.stringify(mergedArchive),
-                );
+                const saveError = persistArchive(mergedArchive);
+                if (saveError) setErrorMessage(`Failed to update history: ${saveError}`);
                 console.log(
                     `Added ${newItems.length} files from disk to archive`,
                 );
@@ -576,6 +670,7 @@ function App() {
             await verifyArchiveFiles(archive);
         } catch (error) {
             console.error("Failed to refresh archive:", error);
+            setErrorMessage(`Failed to refresh archive: ${toErrorMessage(error)}`);
         }
     };
 
@@ -629,6 +724,27 @@ function App() {
     };
 
     const getStatusContent = () => {
+        if (binarySetupError) {
+            return (
+                <>
+                    <div className="error-text" title={binarySetupError}>
+                        Required tools could not be prepared: {binarySetupError}
+                    </div>
+                    <button className="retry-button" onClick={handleRetrySetup} type="button">
+                        Retry setup
+                    </button>
+                </>
+            );
+        }
+
+        if (binarySetup && binarySetup.progress < 100 && status === "idle") {
+            return (
+                <div className="setup-text">
+                    Preparing required tools: {binarySetup.status} ({Math.round(binarySetup.progress)}%)
+                </div>
+            );
+        }
+
         if (status === "processing") {
             const remaining = getEstimatedRemaining();
             const showEstimate = remaining > 0 && processingElapsed < 60; // Don't show estimate after 60s
@@ -666,11 +782,23 @@ function App() {
         }
 
         if (status === "error") {
-            return <div className="error-text">Download failed</div>;
+            return (
+                <div className="error-text" title={errorMessage ?? undefined}>
+                    {errorMessage ?? "Download failed"}
+                </div>
+            );
         }
 
         if (status === "cancelled") {
             return <div className="cancelled-text">Download cancelled</div>;
+        }
+
+        if (errorMessage) {
+            return (
+                <div className="error-text" title={errorMessage}>
+                    {errorMessage}
+                </div>
+            );
         }
 
         return null;
@@ -805,7 +933,7 @@ function App() {
                         )}
                     </div>
                     <div
-                        className={`status-info ${status !== "idle" ? "active" : ""}`}
+                        className={`status-info ${status !== "idle" || errorMessage || binarySetup || binarySetupError ? "active" : ""}`}
                     >
                         {getStatusContent()}
                     </div>

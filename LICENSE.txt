@@ -44,6 +44,6 @@ These terms shall be governed by applicable law without regard to conflict of la
 
 By installing ripVID, you confirm that you have read and agree to these terms.
 
-For the full terms and latest updates, visit: https://github.com/BurgessTG/ripVID
+For the full terms and latest updates, visit: https://github.com/honeycomb-Technologies/ripVID
 
 ripVID 2025 - Released under Apache License 2.0

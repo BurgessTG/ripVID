@@ -1,6 +1,6 @@
 {
     "name": "ripvid",
-    "version": "2.2.9",
+    "version": "2.3.0",
     "description": "A modern desktop application for downloading videos from YouTube and X",
     "main": "index.js",
     "scripts": {
@@ -22,10 +22,10 @@
     "license": "Apache-2.0",
     "repository": {
         "type": "git",
-        "url": "https://github.com/yourusername/ripvid.git"
+        "url": "https://github.com/honeycomb-Technologies/ripVID.git"
     },
     "bugs": {
-        "url": "https://github.com/yourusername/ripvid/issues"
+        "url": "https://github.com/honeycomb-Technologies/ripVID/issues"
     },
     "homepage": "https://ripvid.app",
     "devDependencies": {
