@@ -261,18 +261,15 @@ fn build_ytdlp_args(
     binary_manager: &BinaryManager,
 ) -> Vec<String> {
     let mut args = vec![
-        url.to_string(),
         "--no-playlist".to_string(),
-        // Use Bun JS runtime for YouTube extraction (already installed for build system)
+        // Deno is provisioned by BinaryManager and injected into PATH below.
         "--js-runtimes".to_string(),
-        "bun".to_string(),
+        "deno".to_string(),
     ];
 
     // Add ffmpeg location - try bundled first, then system ffmpeg
     let ffmpeg_dir = match binary_manager.get_binary_path("ffmpeg") {
-        Ok(ffmpeg_path) if ffmpeg_path.exists() => {
-            ffmpeg_path.parent().map(|p| p.to_path_buf())
-        }
+        Ok(ffmpeg_path) if ffmpeg_path.exists() => ffmpeg_path.parent().map(|p| p.to_path_buf()),
         _ => None,
     };
 
@@ -282,7 +279,7 @@ fn build_ytdlp_args(
         let system_paths = [
             "/usr/bin",
             "/usr/local/bin",
-            "/opt/homebrew/bin",  // macOS Homebrew
+            "/opt/homebrew/bin", // macOS Homebrew
         ];
 
         for path in &system_paths {
@@ -355,6 +352,10 @@ fn build_ytdlp_args(
     args.push("--progress".to_string());
     args.push("--newline".to_string());
 
+    // Terminate option parsing so a URL can never be interpreted as a yt-dlp flag.
+    args.push("--".to_string());
+    args.push(url.to_string());
+
     args
 }
 
@@ -393,6 +394,13 @@ fn parse_progress(line: &str) -> Option<DownloadProgress> {
     })
 }
 
+/// Emit frontend events while preserving the backend error in the log.
+fn emit_event<S: Serialize + Clone>(window: &tauri::WebviewWindow, event: &str, payload: S) {
+    if let Err(error) = window.emit(event, payload) {
+        error!("Failed to emit '{}' event: {}", event, error);
+    }
+}
+
 /// Unified download function for both video and audio
 pub async fn download_content(
     url: String,
@@ -412,19 +420,46 @@ pub async fn download_content(
     );
 
     // Build arguments
-    let args = build_ytdlp_args(&url, &output_path, &download_type, &browser_config, &binary_manager);
+    let args = build_ytdlp_args(
+        &url,
+        &output_path,
+        &download_type,
+        &browser_config,
+        &binary_manager,
+    );
     debug!("yt-dlp args prepared (count: {})", args.len());
 
     // Get yt-dlp path from binary manager
     let ytdlp_path = binary_manager.get_binary_path("yt-dlp").ok();
 
-    // Spawn yt-dlp process (Bun is used as JS runtime, already in system PATH)
+    // GUI-launched apps do not reliably inherit the user's shell PATH. Prepend the
+    // managed binary directory so yt-dlp can resolve the managed Deno runtime.
+    let binaries_dir = binary_manager
+        .get_binary_path("deno")
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let modified_path = binaries_dir
+        .as_ref()
+        .map(|directory| {
+            let separator = if cfg!(windows) { ";" } else { ":" };
+            format!(
+                "{}{}{}",
+                directory.to_string_lossy(),
+                separator,
+                current_path
+            )
+        })
+        .unwrap_or(current_path);
+
+    // Spawn yt-dlp with the managed runtime available through PATH.
     let (mut rx, child) = if let Some(path) = ytdlp_path {
         if path.exists() {
             info!("Using downloaded yt-dlp from: {:?}", path);
             app.shell()
                 .command(path)
                 .args(&args)
+                .env("PATH", &modified_path)
                 .spawn()
                 .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
         } else {
@@ -433,6 +468,7 @@ pub async fn download_content(
                 .sidecar("yt-dlp")
                 .map_err(|e| DownloadError::Sidecar(e.to_string()))?
                 .args(&args)
+                .env("PATH", &modified_path)
                 .spawn()
                 .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
         }
@@ -442,6 +478,7 @@ pub async fn download_content(
             .sidecar("yt-dlp")
             .map_err(|e| DownloadError::Sidecar(e.to_string()))?
             .args(&args)
+            .env("PATH", &modified_path)
             .spawn()
             .map_err(|e| DownloadError::ProcessFailed(e.to_string()))?
     };
@@ -462,15 +499,14 @@ pub async fn download_content(
     }
 
     // Emit download started event
-    window
-        .emit(
-            "download-started",
-            serde_json::json!({
-                "id": download_id,
-                "path": output_path
-            }),
-        )
-        .ok();
+    emit_event(
+        &window,
+        "download-started",
+        serde_json::json!({
+            "id": download_id,
+            "path": output_path
+        }),
+    );
 
     // Clone variables for async task
     let window_clone = window.clone();
@@ -483,6 +519,7 @@ pub async fn download_content(
     // Spawn async task to handle command events
     tauri::async_runtime::spawn(async move {
         let mut stderr_buffer = String::new();
+        let mut terminated = false;
 
         while let Some(event) = rx.recv().await {
             match event {
@@ -504,20 +541,19 @@ pub async fn download_content(
                         } else {
                             "Processing video..."
                         };
-                        window_clone
-                            .emit(
-                                "download-processing",
-                                serde_json::json!({
-                                    "message": message,
-                                    "id": download_id_clone
-                                }),
-                            )
-                            .ok();
+                        emit_event(
+                            &window_clone,
+                            "download-processing",
+                            serde_json::json!({
+                                "message": message,
+                                "id": download_id_clone
+                            }),
+                        );
                     }
 
                     // Parse and emit progress
                     if let Some(progress) = parse_progress(&line) {
-                        window_clone.emit("download-progress", &progress).ok();
+                        emit_event(&window_clone, "download-progress", progress);
                     }
                 }
                 CommandEvent::Stderr(line_data) => {
@@ -528,10 +564,11 @@ pub async fn download_content(
 
                     // Emit status messages for important events
                     if line.contains("Sleeping") || line.contains("rate limit") {
-                        window_clone2.emit("download-status", &line).ok();
+                        emit_event(&window_clone2, "download-status", line.clone());
                     }
                 }
                 CommandEvent::Terminated(payload) => {
+                    terminated = true;
                     // Remove from active downloads
                     {
                         let mut downloads = active_downloads_clone.lock().await;
@@ -550,7 +587,9 @@ pub async fn download_content(
                         // Check for common variations: .mp3, .m4a, .webm, .opus, etc.
                         let base = output_path.with_extension("");
                         let base_str = base.to_string_lossy();
-                        let extensions = ["mp3", "m4a", "webm", "opus", "mp4", "mkv", "aac", "ogg", "wav"];
+                        let extensions = [
+                            "mp3", "m4a", "webm", "opus", "mp4", "mkv", "aac", "ogg", "wav",
+                        ];
                         extensions.iter().find_map(|ext| {
                             let variant = format!("{}.{}", base_str, ext);
                             if std::path::Path::new(&variant).exists() {
@@ -565,21 +604,24 @@ pub async fn download_content(
                     if let Some(code) = payload.code {
                         // SUCCESS: Either exit code 0 OR file exists (download succeeded despite warnings)
                         if code == 0 || actual_file_path.is_some() {
-                            let final_path = actual_file_path.unwrap_or_else(|| output_path_clone.clone());
+                            let final_path =
+                                actual_file_path.unwrap_or_else(|| output_path_clone.clone());
                             if code != 0 {
                                 warn!("Download had non-zero exit code ({}) but file exists at {} - treating as success", code, final_path);
                             }
-                            info!("Download completed successfully: {} -> {}", download_id_clone, final_path);
-                            window_clone3
-                                .emit(
-                                    "download-complete",
-                                    serde_json::json!({
-                                        "success": true,
-                                        "id": download_id_clone,
-                                        "path": final_path
-                                    }),
-                                )
-                                .ok();
+                            info!(
+                                "Download completed successfully: {} -> {}",
+                                download_id_clone, final_path
+                            );
+                            emit_event(
+                                &window_clone3,
+                                "download-complete",
+                                serde_json::json!({
+                                    "success": true,
+                                    "id": download_id_clone,
+                                    "path": final_path
+                                }),
+                            );
                         } else {
                             // Log full stderr for debugging
                             error!(
@@ -604,36 +646,64 @@ pub async fn download_content(
                             };
 
                             error!("Download failed: {} - {}", download_id_clone, error_msg);
-                            window_clone3
-                                .emit(
-                                    "download-complete",
-                                    serde_json::json!({
-                                        "success": false,
-                                        "id": download_id_clone,
-                                        "error": error_msg
-                                    }),
-                                )
-                                .ok();
+                            emit_event(
+                                &window_clone3,
+                                "download-complete",
+                                serde_json::json!({
+                                    "success": false,
+                                    "id": download_id_clone,
+                                    "error": error_msg
+                                }),
+                            );
                         }
                     } else {
                         error!(
                             "Download terminated without exit code: {}",
                             download_id_clone
                         );
-                        window_clone3
-                            .emit(
-                                "download-complete",
-                                serde_json::json!({
-                                    "success": false,
-                                    "id": download_id_clone,
-                                    "error": "Process terminated without exit code"
-                                }),
-                            )
-                            .ok();
+                        emit_event(
+                            &window_clone3,
+                            "download-complete",
+                            serde_json::json!({
+                                "success": false,
+                                "id": download_id_clone,
+                                "error": "Process terminated without exit code"
+                            }),
+                        );
                     }
+                }
+                CommandEvent::Error(message) => {
+                    error!(
+                        "yt-dlp process error for {}: {}",
+                        download_id_clone, message
+                    );
+                    stderr_buffer.push_str(&message);
+                    stderr_buffer.push('\n');
                 }
                 _ => {}
             }
+        }
+
+        // Do not leave the frontend waiting forever if the IPC stream closes without
+        // delivering the normal termination event.
+        if !terminated {
+            error!(
+                "yt-dlp event stream ended unexpectedly: {}",
+                download_id_clone
+            );
+            active_downloads_clone
+                .lock()
+                .await
+                .remove(&download_id_clone);
+            emit_event(
+                &window_clone3,
+                "download-complete",
+                serde_json::json!({
+                    "success": false,
+                    "id": download_id_clone,
+                    "error": "Download process ended unexpectedly"
+                }),
+            );
         }
     });
 
@@ -696,6 +766,7 @@ pub async fn download_content_with_smart_retry(
 
     // Attempt 2-4: Try with cookies from different browsers
     let browsers_to_try = vec!["firefox", "chrome", "edge"];
+    let mut attempt_errors = Vec::new();
 
     for (index, browser_name) in browsers_to_try.iter().enumerate() {
         info!(
@@ -733,6 +804,7 @@ pub async fn download_content_with_smart_retry(
             }
             Err(e) => {
                 let error_str = e.to_string();
+                attempt_errors.push(format!("{}: {}", browser_name, error_str));
                 if error_str.contains("DPAPI") || error_str.contains("decrypt") {
                     warn!(
                         "⚠️  {} cookie decryption failed (DPAPI issue), trying next browser...",
@@ -749,11 +821,13 @@ pub async fn download_content_with_smart_retry(
         }
     }
 
-    // All attempts failed
-    error!("❌ All download attempts failed");
-    Err(DownloadError::Authentication(
-        "Unable to download this video. It may require login. Please verify the video is accessible in your browser, or install Firefox and log into the website there for automatic authentication.".to_string()
-    ))
+    // All attempts failed. Preserve the browser-specific failures for diagnostics.
+    error!("❌ All download attempts failed: {:?}", attempt_errors);
+    let mut message = "Unable to download this video. It may require login. Please verify the video is accessible in your browser, or install Firefox and log into the website there for automatic authentication.".to_string();
+    if !attempt_errors.is_empty() {
+        message.push_str(&format!(" (attempts: {})", attempt_errors.join("; ")));
+    }
+    Err(DownloadError::Authentication(message))
 }
 
 /// Cancel an active download

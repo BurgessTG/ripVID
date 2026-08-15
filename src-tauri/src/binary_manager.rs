@@ -66,7 +66,7 @@ impl BinaryManager {
         fs::create_dir_all(&self.data_dir)
             .map_err(|e| format!("Failed to create binaries directory: {}", e))?;
 
-        // Check each binary (yt-dlp, ffmpeg, ffprobe - Bun used for JS runtime instead of Deno)
+        // Check each binary. yt-dlp needs a JavaScript runtime for current YouTube extraction.
         let mut missing = Vec::new();
 
         if !self.is_binary_present("yt-dlp")? {
@@ -78,6 +78,9 @@ impl BinaryManager {
         if !self.is_binary_present("ffprobe")? {
             missing.push("ffprobe");
         }
+        if !self.is_binary_present("deno")? {
+            missing.push("deno");
+        }
 
         // If any are missing, download them (first run)
         if !missing.is_empty() {
@@ -88,15 +91,17 @@ impl BinaryManager {
             let manager1 = self.clone_for_background();
             let manager2 = self.clone_for_background();
             let manager3 = self.clone_for_background();
+            let manager4 = self.clone_for_background();
 
             let handles = vec![
                 tokio::spawn(async move { manager1.download_ytdlp().await }),
                 tokio::spawn(async move { manager2.download_ffmpeg().await }),
                 tokio::spawn(async move { manager3.download_ffprobe().await }),
+                tokio::spawn(async move { manager4.download_deno().await }),
             ];
 
             let mut errors = Vec::new();
-            const BINARY_NAMES: [&str; 3] = ["yt-dlp", "ffmpeg", "ffprobe"];
+            const BINARY_NAMES: [&str; 4] = ["yt-dlp", "ffmpeg", "ffprobe", "deno"];
             for (i, handle) in handles.into_iter().enumerate() {
                 let binary_name = BINARY_NAMES[i];
                 match handle.await {
@@ -160,6 +165,15 @@ impl BinaryManager {
             Err(e) => warn!("Failed to update ffmpeg: {}", e),
         }
 
+        match self.update_deno_if_needed().await {
+            Ok(updated) => {
+                if updated {
+                    info!("Deno was updated successfully");
+                }
+            }
+            Err(e) => warn!("Failed to update Deno: {}", e),
+        }
+
         // Save last check time
         self.save_last_check()?;
 
@@ -173,20 +187,25 @@ impl BinaryManager {
             return Ok(true);
         }
 
-        let content = fs::read_to_string(&version_file).ok();
-        if let Some(content) = content {
-            if let Ok(last_check) = content.parse::<u64>() {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-
-                // Check once per day (86400 seconds)
-                return Ok(now - last_check > 86400);
+        match fs::read_to_string(&version_file) {
+            Ok(content) => match content.trim().parse::<u64>() {
+                Ok(last_check) => {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    Ok(now.saturating_sub(last_check) > 86400)
+                }
+                Err(e) => {
+                    warn!("Malformed update-check timestamp: {}", e);
+                    Ok(true)
+                }
+            },
+            Err(e) => {
+                warn!("Failed to read update-check timestamp: {}", e);
+                Ok(true)
             }
         }
-
-        Ok(true)
     }
 
     fn save_last_check(&self) -> Result<(), String> {
@@ -328,7 +347,12 @@ impl BinaryManager {
         let sources = self.get_ffmpeg_sources();
 
         for (i, source) in sources.iter().enumerate() {
-            info!("Trying ffmpeg source {}/{}: {}", i + 1, sources.len(), source.name);
+            info!(
+                "Trying ffmpeg source {}/{}: {}",
+                i + 1,
+                sources.len(),
+                source.name
+            );
 
             match self.download_from_source(&client, "ffmpeg", source).await {
                 Ok(()) => {
@@ -360,7 +384,12 @@ impl BinaryManager {
         let sources = self.get_ffprobe_sources();
 
         for (i, source) in sources.iter().enumerate() {
-            info!("Trying ffprobe source {}/{}: {}", i + 1, sources.len(), source.name);
+            info!(
+                "Trying ffprobe source {}/{}: {}",
+                i + 1,
+                sources.len(),
+                source.name
+            );
 
             match self.download_from_source(&client, "ffprobe", source).await {
                 Ok(()) => {
@@ -379,13 +408,93 @@ impl BinaryManager {
 
         Err("All ffprobe sources failed".to_string())
     }
+
+    /// Download Deno, the JavaScript runtime used by current yt-dlp releases.
+    async fn download_deno(&self) -> Result<(), String> {
+        self.emit_progress("deno", 0.0, "Downloading Deno...")?;
+
+        let client = reqwest::Client::new();
+        let release = client
+            .get("https://api.github.com/repos/denoland/deno/releases/latest")
+            .header("User-Agent", "ripVID")
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch Deno release: {}", e))?
+            .error_for_status()
+            .map_err(|e| format!("Deno release request failed: {}", e))?
+            .json::<GitHubRelease>()
+            .await
+            .map_err(|e| format!("Failed to parse Deno release: {}", e))?;
+
+        let asset_name = self.get_deno_asset_name();
+        let asset = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == asset_name)
+            .ok_or_else(|| format!("No Deno asset found for {}", asset_name))?;
+
+        self.emit_progress("deno", 25.0, "Downloading binary...")?;
+        let bytes = client
+            .get(&asset.browser_download_url)
+            .send()
+            .await
+            .map_err(|e| format!("Deno download failed: {}", e))?
+            .error_for_status()
+            .map_err(|e| format!("Deno download failed: {}", e))?
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read Deno bytes: {}", e))?;
+
+        self.emit_progress("deno", 75.0, "Extracting binary...")?;
+        let final_bytes = self.extract_from_zip(&bytes, "deno")?;
+        let path = self.get_binary_path("deno")?;
+        fs::write(&path, final_bytes).map_err(|e| format!("Failed to save Deno: {}", e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("Failed to set Deno permissions: {}", e))?;
+        }
+
+        self.save_binary_info("deno", &release.tag_name, &path)?;
+        self.emit_progress("deno", 100.0, "Ready!")?;
+        info!("Deno {} installed successfully", release.tag_name);
+        Ok(())
+    }
+
+    fn get_deno_asset_name(&self) -> &str {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        return "deno-x86_64-pc-windows-msvc.zip";
+
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        return "deno-x86_64-apple-darwin.zip";
+
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        return "deno-aarch64-apple-darwin.zip";
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        return "deno-x86_64-unknown-linux-gnu.zip";
+
+        #[cfg(not(any(
+            all(target_os = "windows", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "linux", target_arch = "x86_64")
+        )))]
+        return "deno-x86_64-unknown-linux-gnu.zip";
+    }
     async fn download_from_source(
         &self,
         client: &reqwest::Client,
         binary_name: &str,
         source: &DownloadSource,
     ) -> Result<(), String> {
-        self.emit_progress(binary_name, 25.0, &format!("Downloading from {}...", source.name))?;
+        self.emit_progress(
+            binary_name,
+            25.0,
+            &format!("Downloading from {}...", source.name),
+        )?;
 
         let response = client
             .get(&source.url)
@@ -467,8 +576,8 @@ impl BinaryManager {
     /// Extract a binary from a tar.xz archive (Linux)
     fn extract_from_tar_xz(&self, bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
         use std::io::Cursor;
-        use xz2::read::XzDecoder;
         use tar::Archive;
+        use xz2::read::XzDecoder;
 
         info!("Extracting {} from tar.xz archive...", binary_name);
 
@@ -480,12 +589,16 @@ impl BinaryManager {
         let mut archive = Archive::new(xz_decoder);
 
         // Look for the binary in the archive
-        let entries = archive.entries().map_err(|e| format!("Failed to read tar entries: {}", e))?;
+        let entries = archive
+            .entries()
+            .map_err(|e| format!("Failed to read tar entries: {}", e))?;
 
         for entry_result in entries {
             let mut entry = entry_result.map_err(|e| format!("Failed to read entry: {}", e))?;
             let path_str = {
-                let path = entry.path().map_err(|e| format!("Failed to get path: {}", e))?;
+                let path = entry
+                    .path()
+                    .map_err(|e| format!("Failed to get path: {}", e))?;
                 path.to_string_lossy().to_string()
             };
 
@@ -500,7 +613,9 @@ impl BinaryManager {
 
             if is_match && entry.header().entry_type().is_file() {
                 let mut buffer = Vec::new();
-                entry.read_to_end(&mut buffer).map_err(|e| format!("Failed to read entry: {}", e))?;
+                entry
+                    .read_to_end(&mut buffer)
+                    .map_err(|e| format!("Failed to read entry: {}", e))?;
                 info!("Extracted {} from tar.xz ({})", binary_name, path_str);
                 return Ok(buffer);
             }
@@ -511,8 +626,8 @@ impl BinaryManager {
 
     /// Extract a binary from a tar.gz archive (fallback)
     fn extract_from_tar_gz(&self, bytes: &[u8], binary_name: &str) -> Result<Vec<u8>, String> {
-        use std::io::Cursor;
         use flate2::read::GzDecoder;
+        use std::io::Cursor;
         use tar::Archive;
 
         info!("Extracting {} from tar.gz archive...", binary_name);
@@ -525,12 +640,16 @@ impl BinaryManager {
         let mut archive = Archive::new(gz_decoder);
 
         // Look for the binary
-        let entries = archive.entries().map_err(|e| format!("Failed to read tar entries: {}", e))?;
+        let entries = archive
+            .entries()
+            .map_err(|e| format!("Failed to read tar entries: {}", e))?;
 
         for entry_result in entries {
             let mut entry = entry_result.map_err(|e| format!("Failed to read entry: {}", e))?;
             let path_str = {
-                let path = entry.path().map_err(|e| format!("Failed to get path: {}", e))?;
+                let path = entry
+                    .path()
+                    .map_err(|e| format!("Failed to get path: {}", e))?;
                 path.to_string_lossy().to_string()
             };
 
@@ -543,7 +662,9 @@ impl BinaryManager {
 
             if is_match && entry.header().entry_type().is_file() {
                 let mut buffer = Vec::new();
-                entry.read_to_end(&mut buffer).map_err(|e| format!("Failed to read entry: {}", e))?;
+                entry
+                    .read_to_end(&mut buffer)
+                    .map_err(|e| format!("Failed to read entry: {}", e))?;
                 info!("Extracted {} from tar.gz ({})", binary_name, path_str);
                 return Ok(buffer);
             }
@@ -592,14 +713,12 @@ impl BinaryManager {
         ];
 
         #[cfg(target_os = "macos")]
-        return vec![
-            DownloadSource {
-                name: "evermeet.cx",
-                url: "https://evermeet.cx/ffmpeg/getrelease/zip".to_string(),
-                version: "latest".to_string(),
-                archive_type: ArchiveType::Zip,
-            },
-        ];
+        return vec![DownloadSource {
+            name: "evermeet.cx",
+            url: "https://evermeet.cx/ffmpeg/getrelease/zip".to_string(),
+            version: "latest".to_string(),
+            archive_type: ArchiveType::Zip,
+        }];
 
         #[cfg(target_os = "linux")]
         return vec![
@@ -620,31 +739,28 @@ impl BinaryManager {
 
     fn get_ffprobe_sources(&self) -> Vec<DownloadSource> {
         #[cfg(target_os = "windows")]
-        return vec![
-            DownloadSource {
-                name: "gyan.dev",
-                url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".to_string(),
-                version: "latest".to_string(),
-                archive_type: ArchiveType::Zip,
-            },
-        ];
+        return vec![DownloadSource {
+            name: "gyan.dev",
+            url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip".to_string(),
+            version: "latest".to_string(),
+            archive_type: ArchiveType::Zip,
+        }];
 
         #[cfg(target_os = "macos")]
-        return vec![
-            DownloadSource {
-                name: "evermeet.cx",
-                url: "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip".to_string(),
-                version: "latest".to_string(),
-                archive_type: ArchiveType::Zip,
-            },
-        ];
+        return vec![DownloadSource {
+            name: "evermeet.cx",
+            url: "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip".to_string(),
+            version: "latest".to_string(),
+            archive_type: ArchiveType::Zip,
+        }];
 
         #[cfg(target_os = "linux")]
         return vec![
             // ffprobe is included in the ffmpeg static build
             DownloadSource {
                 name: "johnvansickle.com",
-                url: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz".to_string(),
+                url: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+                    .to_string(),
                 version: "latest".to_string(),
                 archive_type: ArchiveType::TarXz,
             },
@@ -678,7 +794,10 @@ impl BinaryManager {
                 info!("yt-dlp is up to date ({})", current);
                 return Ok(false);
             }
-            info!("yt-dlp update available: {} -> {}", current, release.tag_name);
+            info!(
+                "yt-dlp update available: {} -> {}",
+                current, release.tag_name
+            );
         } else {
             info!("No yt-dlp version info found, will download latest");
         }
@@ -710,7 +829,10 @@ impl BinaryManager {
             release.tag_name
         );
 
-        if let Ok(expected_checksum) = self.fetch_and_parse_checksum(&client, &checksums_url, asset_name).await {
+        if let Ok(expected_checksum) = self
+            .fetch_and_parse_checksum(&client, &checksums_url, asset_name)
+            .await
+        {
             let actual_checksum = self.calculate_sha256(&bytes);
             if actual_checksum.to_lowercase() != expected_checksum.to_lowercase() {
                 return Err(format!(
@@ -725,7 +847,11 @@ impl BinaryManager {
 
         // Backup existing binary
         let path = self.get_binary_path("yt-dlp")?;
-        let backup_path = self.data_dir.join(if cfg!(windows) { "yt-dlp.exe.backup" } else { "yt-dlp.backup" });
+        let backup_path = self.data_dir.join(if cfg!(windows) {
+            "yt-dlp.exe.backup"
+        } else {
+            "yt-dlp.backup"
+        });
 
         if path.exists() {
             fs::copy(&path, &backup_path).ok();
@@ -792,6 +918,30 @@ impl BinaryManager {
         }
 
         info!("ffmpeg is up to date");
+        Ok(false)
+    }
+
+    /// Check and update Deno if it is older than 30 days.
+    async fn update_deno_if_needed(&self) -> Result<bool, String> {
+        let deno_path = self.get_binary_path("deno")?;
+        if !deno_path.exists() {
+            self.download_deno().await?;
+            return Ok(true);
+        }
+
+        match fs::metadata(&deno_path).and_then(|metadata| metadata.modified()) {
+            Ok(modified) => {
+                let age = SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or_default();
+                if age.as_secs() > 30 * 24 * 60 * 60 {
+                    self.download_deno().await?;
+                    return Ok(true);
+                }
+            }
+            Err(e) => warn!("Could not determine Deno age: {}", e),
+        }
+
         Ok(false)
     }
 
