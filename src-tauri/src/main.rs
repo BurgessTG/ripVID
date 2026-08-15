@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -167,6 +167,12 @@ async fn cancel_download_command(
     cancel_download(download_id, state.active_downloads.clone(), window)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Retry managed runtime provisioning after a first-launch failure.
+#[tauri::command]
+async fn retry_binary_setup(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.binary_manager.ensure_all_binaries().await
 }
 
 /// Create a directory
@@ -510,24 +516,31 @@ fn main() {
             info!("Initializing binary manager...");
             let binary_manager = Arc::new(BinaryManager::new(app.handle().clone()));
 
-            // Ensure all binaries are downloaded/updated (blocks window until ready)
+            // Register state before starting background provisioning so retry
+            // commands cannot race application initialization.
+            app.manage(AppState {
+                active_downloads: Arc::new(Mutex::new(HashMap::new())),
+                binary_manager: binary_manager.clone(),
+            });
+
+            // Provision managed binaries in the background so a slow network or a
+            // transient upstream failure cannot leave the window permanently hidden.
             info!("Ensuring all binaries are ready...");
             let manager_clone = binary_manager.clone();
-            tauri::async_runtime::block_on(async move {
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
                 match manager_clone.ensure_all_binaries().await {
                     Ok(()) => info!("All binaries ready"),
                     Err(e) => {
                         error!("Failed to ensure binaries: {}", e);
-                        return Err(e);
+                        if let Err(emit_error) = app_handle.emit("binary-setup-error", e.clone()) {
+                            error!(
+                                "Failed to notify frontend about binary setup failure: {}",
+                                emit_error
+                            );
+                        }
                     }
                 }
-                Ok::<(), String>(())
-            })?;
-
-            // Initialize app state
-            app.manage(AppState {
-                active_downloads: Arc::new(Mutex::new(HashMap::new())),
-                binary_manager: binary_manager.clone(),
             });
 
             info!("Application setup complete");
@@ -539,6 +552,7 @@ fn main() {
             download_video,
             download_audio,
             cancel_download_command,
+            retry_binary_setup,
             create_directory,
             open_file_location,
             open_file_directly,

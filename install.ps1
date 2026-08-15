@@ -1,12 +1,12 @@
 #
 # ripVID Windows Installer
-# Usage: irm https://raw.githubusercontent.com/BurgessTG/ripVID/main/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/honeycomb-Technologies/ripVID/main/install.ps1 | iex
 #
 
 $ErrorActionPreference = "Stop"
 
-$VERSION = "2.2.0"
-$REPO = "BurgessTG/ripVID"
+$VERSION = "2.3.0"
+$REPO = "honeycomb-Technologies/ripVID"
 $INSTALLER_URL = "https://github.com/$REPO/releases/download/v$VERSION/ripVID_${VERSION}_x64-setup.exe"
 $TEMP_FILE = "$env:TEMP\ripVID-setup.exe"
 

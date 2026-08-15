@@ -6,7 +6,7 @@ A modern desktop app for downloading videos from YouTube, X/Twitter, TikTok, and
 
 ## Installation
 
-**Windows / macOS / Linux** - Download from [Releases](https://github.com/BurgessTG/ripVID/releases/latest)
+**Windows / macOS / Linux** - Download from [Releases](https://github.com/honeycomb-Technologies/ripVID/releases/latest)
 
 **Arch Linux (AUR)**
 ```bash
@@ -15,12 +15,12 @@ yay -S ripvid
 
 **Linux (curl)**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BurgessTG/ripVID/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/ripVID/main/install.sh | bash
 ```
 
 **Windows (PowerShell)**
 ```powershell
-irm https://raw.githubusercontent.com/BurgessTG/ripVID/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/honeycomb-Technologies/ripVID/main/install.ps1 | iex
 ```
 
 ## Features
@@ -41,7 +41,7 @@ On first launch, ripVID downloads yt-dlp and ffmpeg automatically. These are upd
 **Prerequisites:** Node.js 18+, Rust, Bun
 
 ```bash
-git clone https://github.com/BurgessTG/ripVID.git
+git clone https://github.com/honeycomb-Technologies/ripVID.git
 cd ripVID
 bun install
 bun run tauri:dev
@@ -76,6 +76,6 @@ Apache License 2.0 - See [LICENSE](LICENSE)
 
 ## Links
 
-- [Releases](https://github.com/BurgessTG/ripVID/releases)
-- [Issues](https://github.com/BurgessTG/ripVID/issues)
+- [Releases](https://github.com/honeycomb-Technologies/ripVID/releases)
+- [Issues](https://github.com/honeycomb-Technologies/ripVID/issues)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) | [Tauri](https://tauri.app) | [FFmpeg](https://ffmpeg.org)

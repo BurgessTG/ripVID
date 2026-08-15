@@ -34,6 +34,12 @@ interface DownloadStarted {
     path: string;
 }
 
+interface BinarySetupProgress {
+    binary: string;
+    progress: number;
+    status: string;
+}
+
 const ARCHIVE_STORAGE_KEY = "ripvid-archive";
 
 function toErrorMessage(error: unknown): string {
@@ -89,6 +95,8 @@ function App() {
     );
     const [showSettings, setShowSettings] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const [binarySetup, setBinarySetup] = useState<BinarySetupProgress | null>(null);
+    const [binarySetupError, setBinarySetupError] = useState<string | null>(null);
     const [processingMessage, setProcessingMessage] = useState<string>("Processing...");
     const [processingStartTime, setProcessingStartTime] = useState<number | null>(null);
     const [processingElapsed, setProcessingElapsed] = useState<number>(0);
@@ -131,6 +139,25 @@ function App() {
         const statusUnsubscribe = listen<string>("download-status", (event) => {
             console.log("Status message:", event.payload);
         });
+
+        const binaryProgressUnsubscribe = listen<BinarySetupProgress>(
+            "binary-download-progress",
+            (event) => {
+                setBinarySetup(event.payload);
+                if (event.payload.progress >= 100 && event.payload.binary === "setup") {
+                    setBinarySetupError(null);
+                    setBinarySetup(null);
+                }
+            },
+        );
+
+        const binaryErrorUnsubscribe = listen<string>(
+            "binary-setup-error",
+            (event) => {
+                setBinarySetupError(event.payload);
+                setBinarySetup(null);
+            },
+        );
 
         // Listen for download processing (ffmpeg merge or audio extraction)
         const processingUnsubscribe = listen<{
@@ -241,6 +268,8 @@ function App() {
                 progressUnsubscribe,
                 startedUnsubscribe,
                 statusUnsubscribe,
+                binaryProgressUnsubscribe,
+                binaryErrorUnsubscribe,
                 processingUnsubscribe,
                 completeUnsubscribe,
                 cancelledUnsubscribe,
@@ -456,6 +485,17 @@ function App() {
             setIsDownloading(false);
             setCurrentDownloadId(null);
             downloadInfoRef.current = null;
+        }
+    };
+
+    const handleRetrySetup = async () => {
+        setBinarySetupError(null);
+        setBinarySetup({ binary: "setup", progress: 0, status: "Retrying setup..." });
+        try {
+            await invoke("retry_binary_setup");
+        } catch (error) {
+            setBinarySetup(null);
+            setBinarySetupError(toErrorMessage(error));
         }
     };
 
@@ -684,6 +724,27 @@ function App() {
     };
 
     const getStatusContent = () => {
+        if (binarySetupError) {
+            return (
+                <>
+                    <div className="error-text" title={binarySetupError}>
+                        Required tools could not be prepared: {binarySetupError}
+                    </div>
+                    <button className="retry-button" onClick={handleRetrySetup} type="button">
+                        Retry setup
+                    </button>
+                </>
+            );
+        }
+
+        if (binarySetup && binarySetup.progress < 100 && status === "idle") {
+            return (
+                <div className="setup-text">
+                    Preparing required tools: {binarySetup.status} ({Math.round(binarySetup.progress)}%)
+                </div>
+            );
+        }
+
         if (status === "processing") {
             const remaining = getEstimatedRemaining();
             const showEstimate = remaining > 0 && processingElapsed < 60; // Don't show estimate after 60s
@@ -872,7 +933,7 @@ function App() {
                         )}
                     </div>
                     <div
-                        className={`status-info ${status !== "idle" || errorMessage ? "active" : ""}`}
+                        className={`status-info ${status !== "idle" || errorMessage || binarySetup || binarySetupError ? "active" : ""}`}
                     >
                         {getStatusContent()}
                     </div>

@@ -1,13 +1,13 @@
 #!/bin/bash
 #
 # ripVID Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/BurgessTG/ripVID/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/ripVID/main/install.sh | bash
 #
 
 set -e
 
-VERSION="2.2.0"
-REPO="BurgessTG/ripVID"
+VERSION="2.3.0"
+REPO="honeycomb-Technologies/ripVID"
 INSTALL_DIR="/usr/local/bin"
 APP_NAME="ripvid"
 

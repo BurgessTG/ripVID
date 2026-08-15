@@ -1,11 +1,11 @@
-# Maintainer: BurgessTG <your-email@example.com>
+# Maintainer: BurgessTG
 pkgname=ripvid
-pkgver=2.2.9
+pkgver=2.3.0
 pkgrel=1
 pkgdesc="A beautiful, modern desktop application for downloading videos from YouTube, X/Twitter, and 1000+ sites"
 arch=('x86_64')
-url="https://github.com/BurgessTG/ripVID"
-license=('MIT')
+url="https://github.com/honeycomb-Technologies/ripVID"
+license=('Apache-2.0')
 depends=(
     'webkit2gtk-4.1'
     'gtk3'
@@ -40,7 +40,7 @@ optdepends=(
 )
 provides=('ripvid')
 conflicts=('ripvid-bin' 'ripvid-git')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/BurgessTG/ripVID/archive/refs/tags/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/honeycomb-Technologies/ripVID/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
